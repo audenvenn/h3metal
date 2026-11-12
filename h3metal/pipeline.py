@@ -7,7 +7,6 @@ the same time; on a 24 GB Mac the 33 B transformer gets the memory to itself.
 
 from __future__ import annotations
 
-import math
 import os
 import time
 from dataclasses import dataclass, field

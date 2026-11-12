@@ -1,6 +1,8 @@
 """Writes a transformer file with the real shapes and random weights, for timing and memory tests without the
 checkpoint: python bench/synthetic_dit.py OUT.h3m q8|q4"""
-import os, sys, time
+import os
+import sys
+import time
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.weights import Writer, bf16_bits

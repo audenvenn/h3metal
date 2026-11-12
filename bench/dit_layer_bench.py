@@ -1,9 +1,9 @@
 """Time one full-size DiT block (random weights) at a given image size; extrapolates a 6-step, 50-block run."""
-import os, sys, time
+import os
+import sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu
-from h3metal import ops
 from h3metal.ops import QWeight
 from h3metal.dit import DiT, Layout
 

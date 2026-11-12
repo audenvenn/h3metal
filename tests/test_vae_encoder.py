@@ -1,5 +1,7 @@
 """The GPU VAE encoder against the official module's posterior (see tests/ref/edit_parts.py)."""
-import os, sys, time
+import os
+import sys
+import time
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu

@@ -1,7 +1,10 @@
 """Reference VAE decode with the official module (torch + diffusers env).
     python tests/ref/vae_decode.py WEIGHTS_DIR OUT.npz [lat_h lat_w]"""
-import json, os, sys
-import numpy as np, torch
+import json
+import os
+import sys
+import numpy as np
+import torch
 sys.path.insert(0, os.environ["DIFFUSERS_SCRIPTS"])  # diffusers/scripts, for its weight conversion
 import convert_minimax_h3_to_diffusers as conv
 from safetensors import safe_open

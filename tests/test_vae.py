@@ -1,5 +1,7 @@
 """VAE decoder against the official module on the real weights (see tests/ref/vae_decode.py)."""
-import os, sys, time
+import os
+import sys
+import time
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu

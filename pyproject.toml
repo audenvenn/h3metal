@@ -40,3 +40,12 @@ h3metal = "h3metal.cli:main"
 
 [tool.setuptools]
 packages = ["h3metal"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+# Long lines, one-line compound statements and short names are fine in kernels' launchers and tests.
+ignore = ["E501", "E701", "E702", "E731", "E741", "E402"]

@@ -1,11 +1,11 @@
 """Time one full-size text-encoder layer (random weights)."""
-import os, sys
+import os
+import sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu
-from h3metal import ops
 from h3metal.ops import QWeight
-from h3metal.te import TextEncoder, mrope_angles
+from h3metal.te import TextEncoder
 
 D, Hq, Hkv, hd, F = 5120, 64, 8, 128, 25600
 gpu = Gpu(); rng = np.random.default_rng(0)

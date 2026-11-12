@@ -17,7 +17,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install test dependencies
-        run: pip install numpy
+        run: pip install numpy ruff
+      - name: Lint
+        run: ruff check .
       - name: Byte-compile all Python sources
         run: python -m compileall -q h3metal tests bench tools
       - name: Conversion numerics (no GPU)

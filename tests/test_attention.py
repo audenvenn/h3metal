@@ -1,5 +1,6 @@
 """Flash attention kernel against NumPy."""
-import os, sys
+import os
+import sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu

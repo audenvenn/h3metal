@@ -11,7 +11,11 @@ measure its image quality.
     python tests/ref/reference.py --weights DIR --prompt "..." --size 1024x1024 \
         --min-area 1024 --seed 0 --dtype bf16 --out ref.npz
 """
-import argparse, json, math, os, sys, time
+import argparse
+import json
+import os
+import sys
+import time
 import numpy as np
 import torch
 from safetensors import safe_open
@@ -129,7 +133,6 @@ def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
     sh = Shards(os.path.join(W, "transformer"))
     ccfg = dict(cfgj)
     H, HD = cfgj["num_attention_heads"], cfgj["attention_head_dim"]
-    convcfg = {"num_attention_heads": H, "attention_head_dim": HD, "ffn_dim": cfgj["ffn_dim"]}
     small = dict(cfgj, num_layers=0)
     model = tm.MiniMaxH3ImageTransformer2DModel(**small).eval()
     # Glue weights (everything but the 50 blocks), from the original keys.

@@ -1,5 +1,6 @@
 """Throughput of the GEMM kernels at the transformer's shapes."""
-import os, sys, time
+import os
+import sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu
@@ -49,7 +50,7 @@ if __name__ == "__main__":
                     try:
                         dt, tf = run(gpu, fmt, M, K, N, t, G=G, swz=int(os.environ.get("SWZ", "1")))
                         res.append((tf, dt, t))
-                    except Exception as e:
+                    except Exception:
                         pass
                 tf, dt, t = max(res)
                 line = f"M={M:6d} {name:4s} {fmt:4s} best tile {t}: {dt*1e3:8.2f} ms {tf:6.2f} TOPS   " + \

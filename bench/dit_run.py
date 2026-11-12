@@ -1,6 +1,9 @@
 """Times a whole denoising run (6 steps x 50 blocks) of a transformer file at a given size, with memory counters:
 python bench/dit_run.py DIT.h3m SIZE [SIZE...]"""
-import os, subprocess, sys, time
+import os
+import subprocess
+import sys
+import time
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu

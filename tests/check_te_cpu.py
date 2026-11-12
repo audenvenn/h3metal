@@ -78,7 +78,7 @@ def rope(x: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
 
 def forward(f: File, ids: np.ndarray, log=None) -> np.ndarray:
     c = f.meta["config"]
-    D, Hq, Hkv, hd, F, L, eps = c["hidden"], c["heads"], c["kv_heads"], c["head_dim"], c["ffn"], c["layers"], c["eps"]
+    Hq, Hkv, hd, F, L, eps = c["heads"], c["kv_heads"], c["head_dim"], c["ffn"], c["layers"], c["eps"]
     T, rep = len(ids), Hq // Hkv
     x = bf16_to_f32(f.tensor("embed")[ids]).astype(np.float32)
     ang = mrope_angles(np.tile(np.arange(T), (3, 1)), hd, c["rope_theta"], c["mrope_section"])

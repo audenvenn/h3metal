@@ -1,7 +1,9 @@
 """GPTQ calibration on the mini DiT (see tests/ref/mini_dit.py): runs end to end and does not do worse than
 rounding to nearest. The calibration trajectory comes from the int8 model itself, the comparison from the
 official module's velocities."""
-import os, sys, tempfile
+import os
+import sys
+import tempfile
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu

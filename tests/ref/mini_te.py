@@ -1,7 +1,10 @@
 """Reference side of the mini text-encoder test: a small random Qwen3-VL text model (torch + transformers).
     python tests/ref/mini_te.py OUT_DIR"""
-import json, os, sys
-import numpy as np, torch
+import json
+import os
+import sys
+import numpy as np
+import torch
 from safetensors.torch import save_file
 from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
 out = sys.argv[1]

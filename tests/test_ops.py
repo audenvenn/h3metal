@@ -1,5 +1,6 @@
 """Row kernels (norm + modulation + rotation + int8, rotation of SwiGLU outputs, q/k norm + rope, fp32 linear)."""
-import os, sys
+import os
+import sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu

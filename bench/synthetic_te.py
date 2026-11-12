@@ -1,5 +1,7 @@
 """Writes a text-encoder file with the real shapes and random int8 weights (24 GB): python bench/synthetic_te.py OUT"""
-import os, sys, time
+import os
+import sys
+import time
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.weights import Writer

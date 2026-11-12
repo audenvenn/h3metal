@@ -1,7 +1,8 @@
-import os, sys, numpy as np
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from h3metal.gpu import Gpu
-gpu = Gpu(os.path.join(os.path.dirname(__file__), "metal"))
+gpu = Gpu(os.path.dirname(os.path.abspath(__file__)))  # this directory holds layout.metal
 for TM, TN, NSG in [(64, 128, 4), (128, 128, 8), (16, 32, 1)]:
     k = gpu.kernel("layout.metal", "layout", TM=TM, TN=TN, NSG=NSG)
     a = gpu.empty((TM, 128), "i8"); w = gpu.empty((TN, 64), "u8"); out = gpu.empty((NSG * 32 * 256 * 2 + 1,), "i32")

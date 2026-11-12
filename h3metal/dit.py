@@ -225,7 +225,7 @@ class DiT:
         g, D, lay = self.gpu, self.D, self.layout
         S, T = lay.length, lay.n_text
         b = self._bufs
-        Sp, x = b["Sp"], b["x"]
+        x = b["x"]
         n_img = lay.n_ref_rows + lay.n_img_rows
         lat = b["lat"].numpy()
         lat[:n_img] = latents

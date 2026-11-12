@@ -17,7 +17,7 @@ import os
 import numpy as np
 
 from . import ops
-from .gpu import Gpu, Tensor
+from .gpu import Gpu
 from .quant import quantize, random_signs, rotate_in
 from .st import Sharded
 from .weights import WeightFile, Writer, bf16_bits, bf16_to_f32

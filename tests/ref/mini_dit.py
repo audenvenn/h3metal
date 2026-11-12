@@ -8,7 +8,9 @@ h3metal and compares.
 
     python tests/ref/mini_dit.py OUT_DIR
 """
-import json, os, sys
+import json
+import os
+import sys
 import numpy as np
 import torch
 from safetensors.torch import save_file

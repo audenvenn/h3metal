@@ -4,8 +4,11 @@ positions, and the VAE encoder's posterior.
 
     python tests/ref/edit_parts.py WEIGHTS_DIR IMAGE OUT.npz
 """
-import json, os, sys
-import numpy as np, torch
+import json
+import os
+import sys
+import numpy as np
+import torch
 from PIL import Image
 from safetensors import safe_open
 
