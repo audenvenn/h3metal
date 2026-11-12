@@ -12,6 +12,7 @@ measure its image quality.
         --min-area 1024 --seed 0 --dtype bf16 --out ref.npz
 """
 import argparse
+import gc
 import json
 import threading
 import os
@@ -188,13 +189,22 @@ def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
     glue.update(conv.convert_pdd_heads(W, cfgj))
     missing, unexpected = model.load_state_dict(glue, strict=False)
     assert not [m for m in missing if not m.startswith("transformer_blocks")], missing
+    del glue
     model.to(dev)
     for n, p in model.named_parameters():  # keep the checkpoint's mixed precision
         if not n.startswith(("proj_in", "time_embedder", "pdd_proj_out")):
             p.data = p.data.to(dtype)
     tm.dispatch_attention_fn = _chunked_attention
+    # The block takes every weight from the checkpoint each time, so it is built in the compute dtype directly
+    # (built in float32 first, it would hold 2.6 GB on the CPU for nothing).
+    default = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
     block = tm.MiniMaxH3ImageTransformerBlock(cfgj["hidden_size"], H, HD, cfgj["ffn_dim"], cfgj["time_embed_dim"],
                                               cfgj["norm_eps"], cfgj["qk_norm_eps"]).to(dev, dtype).eval()
+    torch.set_default_dtype(default)
+    gc.collect()
+    if dev.type == "mps":
+        torch.mps.empty_cache()
     sig = [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0]
     t0 = torch.tensor([1.0 - s for s in sig[:-1]], dtype=torch.float32)
     sigmas = torch.cat([1.0 - t0, torch.zeros(1)])
