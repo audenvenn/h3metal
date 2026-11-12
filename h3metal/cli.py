@@ -48,6 +48,7 @@ def cmd_generate(a):
     from .pipeline import Pipeline, generate_edit
     t0 = time.time()
     pipe = Pipeline(a.model)
+    _check_device(pipe.gpu.device)
     w, h = a.size
     for i in range(a.count):
         seed = a.seed + i
@@ -99,11 +100,19 @@ def cmd_download(a):
     print(f"next: h3metal convert {a.dest}")
 
 
+def _check_device(device: str):
+    from .gpu import has_matrix_units
+    if not has_matrix_units(device):
+        print(f"warning: h3metal is built for the GPU matrix units of M5- and M6-class chips; on {device} its "
+              "kernels may fail to compile or run far slower.", file=sys.stderr)
+
+
 def cmd_info(a):
     from .gpu import Gpu
     g = Gpu()
     print(f"device: {g.device}; recommended working set {g.working_set / 1e9:.1f} GB; "
           f"max buffer {g.max_buffer / 1e9:.1f} GB")
+    _check_device(g.device)
     for k in ("te", "dit", "vae", "vision"):
         p = os.path.join(a.model, f"{k}.h3m")
         if os.path.exists(p):

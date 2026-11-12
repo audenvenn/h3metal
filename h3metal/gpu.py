@@ -156,6 +156,13 @@ class Tensor:
                       self.dtype)
 
 
+def has_matrix_units(device: str) -> bool:
+    """Whether the GPU has the matrix units (neural accelerators) h3metal's products are built for: M5 and later."""
+    import re
+    m = re.search(r"\bApple M(\d+)", device)
+    return bool(m) and int(m.group(1)) >= 5
+
+
 class Kernel:
     """A compiled pipeline plus its launch geometry helpers."""
 
