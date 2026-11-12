@@ -1,0 +1,33 @@
+{
+  "t2i": [
+    {
+      "id": "feast",
+      "prompt": "The image is an overhead, top-down photograph of a rustic farm-to-table feast spread across a weathered, dark brown wooden table with visible grain, knots, and a worn finish. In the center, a large woven basket holds a freshly baked rustic loaf of bread with a cracked golden-brown crust and scattered flour, alongside a halved loaf. To the left, a large dark ceramic plate presents an assortment of colorful seasonal vegetables, including bright orange carrots, deep red heirloom tomatoes, purple cabbage, and a mound of vibrant green leafy kale and arugula. On the right side, a wooden board displays artisanal cheeses: a wedge of sharp aged cheddar, a round of creamy brie with a rind, a soft blue cheese, and a few scattered almonds and walnuts. Below the bread in the lower center, a shallow bowl contains roasted root vegetables, including golden potatoes and beets, sprinkled with fresh rosemary sprigs. At the upper right, a glass jar of golden olive oil stands beside a smaller jar of honey with a wooden dipper. In the lower left, a rustic cloth napkin holds a silver knife and fork. At the upper left, a bunch of purple and red grapes rests near a small bowl of black olives. Scattered herbs, including fresh thyme and sprigs of oregano, decorate the table. The lighting is natural and warm, coming from the upper left and casting soft, long shadows to the lower right, enhancing the texture of the bread, the moisture of the vegetables, and the overall cozy, bountiful atmosphere of the meal.",
+      "note": "the official example's expanded prompt (examples/revised_prompt.t2i.txt)"
+    },
+    {
+      "id": "fox",
+      "prompt": "A red fox sitting in fresh snow at sunrise, photorealistic, soft golden light."
+    },
+    {
+      "id": "neon",
+      "prompt": "A vintage neon sign above a diner door that reads \"OPEN 24 HOURS\", night, light rain, reflections on the wet pavement."
+    },
+    {
+      "id": "lighthouse",
+      "prompt": "A watercolor illustration of a lighthouse on a cliff with seagulls, soft pastel colors, paper texture."
+    },
+    {
+      "id": "fisherman",
+      "prompt": "A close-up portrait of an elderly fisherman with a weathered face and a knitted cap, natural window light, shallow depth of field."
+    }
+  ],
+  "edit": [
+    {
+      "id": "podcast",
+      "image": "examples/reference1.png",
+      "prompt": "The man on the left in a dark sweater and wristwatch in <Picture 1> is <Subject 1>. The woman on the right in a beige sweater and hoop earrings in <Picture 1> is <Subject 2>. The pair of black microphones on stands in front of the hosts in <Picture 1> is <Subject 3>. The wooden desk sign with raised lettering reading 'MONEY TALKS' in <Picture 1> is <Subject 4>. The black mug on the left with text reading 'INVEST', 'IN', and 'YOURSELF' on three lines in <Picture 1> is <Subject 5>. The black mug on the right with text reading 'PLAN', 'BUILD', and 'WEALTH' on three lines in <Picture 1> is <Subject 6>. The upper-right overlay text reading 'EP. 47' in <Picture 1> is <Subject 7>. The framed wall poster on the right reading 'COMPOUND', 'CONSISTENCY', and 'CONFIDENCE' on three lines in <Picture 1> is <Subject 8>. The small framed shelf sign in the center background reading 'DISCIPLINE', '>', and 'MOTIVATION' on three lines in <Picture 1> is <Subject 9>. The podcast studio environment, including the wooden desk, shelves, lamps, books, and decor in <Picture 1>, is <Subject 10>. The target image shows <Subject 1> without the over-ear headphones from <Picture 1> and with fuller hair, as <Subject 1> and <Subject 2> lean inward to fist-bump directly above <Subject 4> between <Subject 3>. <Subject 1> is partially preserved; his identity, facial features, expression, dark sweater, and wristwatch remain, while his headphones are removed, his crown hair is filled in, and his posture changes from resting his forearms on the desk to leaning toward <Subject 2> with lifted elbows for a central fist-bump. <Subject 2> is partially preserved; her identity, facial features, expression, hair, earrings, and beige sweater remain, while her posture changes from crossed arms on the desk to leaning toward <Subject 1> with lifted elbows for a central fist-bump. <Subject 3> is fully preserved. <Subject 4> is fully preserved. <Subject 5> is fully preserved. <Subject 6> is fully preserved. <Subject 7> is fully preserved. <Subject 8> is fully preserved. <Subject 9> is fully preserved. <Subject 10> is fully preserved. On <Subject 1>, the headband indentation across the top of his head is gone, replaced by natural, voluminous wavy brown curls that match the texture and warm highlights of his existing hair, leaving his ears and temples completely uncovered where the earcups and cords used to be. Both <Subject 1> and <Subject 2> angle their torsos slightly inward toward the center of the frame. Their elbows are raised clear off the desk surface, bringing their inner forearms up into the space behind <Subject 3> and directly above <Subject 4>. Their hands are clenched into fists with knuckles touching dead center between the two microphones of <Subject 3>, casting soft contact shadows onto each other's knuckles and subtle warm light reflections from the studio lamps across their sleeves and raised arms.",
+      "note": "the official example (examples/revised_prompt.edit.txt, examples/reference1.png)"
+    }
+  ]
+}

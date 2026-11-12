@@ -42,7 +42,7 @@ def convert_te(src: str, out: str, *, fmt: str = "h8", layers: int = N_LAYERS, s
                        "vocab": tc["vocab_size"], "image_token_id": full.get("image_token_id", 151655)}}
     w = Writer(out, meta)
     emb = st.raw(f"{prefix}.embed_tokens.weight")
-    w.tensor("embed", np.ascontiguousarray(emb), "bf16")
+    w.tensor("embed", np.ascontiguousarray(emb), "bf16", host_only=True)
     rep = Hq // Hkv
     for l in range(layers):
         p = f"{prefix}.layers.{l}"
@@ -169,6 +169,8 @@ class TextEncoder:
             if deepstack is not None and l < len(deepstack):
                 g.wait()
                 x.numpy()[vision_rows] += deepstack[l]
+            else:
+                g.commit()  # one command buffer per layer: only this layer's weights are pinned
             if profile is not None:
                 profile(l)
         g.wait()

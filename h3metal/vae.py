@@ -210,6 +210,7 @@ class VAEDecoder:
             ops.gemm(g, hn, blk["fc1"], ff, M)
             ops.swiglu(g, ff, ffo, M, 4 * D)
             ops.gemm(g, ffo, blk["fc2"], x, M, epi=1, rtype=rt, gate=blk["scale2"])
+            g.commit()
         ops.layer_norm(g, x, self.norm_w, self.norm_b, hn, M, D, eps)
         out = g.empty((Mp, self.proj_out.N), "f32")
         ops.gemm(g, hn, self.proj_out, out, M)

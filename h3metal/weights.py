@@ -31,7 +31,8 @@ from .ops import QWeight
 MAGIC = b"H3MW"
 VERSION = 1
 DATA_START = 8 << 20      # header region reserved at the start of the file
-CHUNK = 2 << 30           # Metal buffer per 2 GiB of file
+CHUNK = 1 << 30           # one Metal buffer per GiB of file: Metal makes a referenced buffer resident as a
+                          # whole, so small chunks keep what a command buffer pins close to what it uses
 ALIGN = 256
 
 _ITEM = {"f32": 4, "f16": 2, "bf16": 2, "i8": 1, "u8": 1, "i32": 4, "u16": 2}
@@ -59,27 +60,32 @@ class Writer:
         self.entries: dict[str, dict] = {}
         self.meta = meta
 
-    def _place(self, nbytes: int) -> int:
+    def _place(self, nbytes: int, host_only: bool = False) -> int:
         pos = (self.pos + ALIGN - 1) // ALIGN * ALIGN
+        if host_only:
+            return pos
         if nbytes > CHUNK:
             raise ValueError(f"tensor of {nbytes} bytes exceeds the {CHUNK}-byte chunk")
         if pos // CHUNK != (pos + nbytes - 1) // CHUNK:
             pos = (pos // CHUNK + 1) * CHUNK
         return pos
 
-    def _write(self, data: np.ndarray) -> dict:
+    def _write(self, data: np.ndarray, host_only: bool = False) -> dict:
         raw = np.ascontiguousarray(data).view(np.uint8).reshape(-1)
-        pos = self._place(raw.nbytes)
+        pos = self._place(raw.nbytes, host_only)
         self.f.seek(pos)
         self.f.write(raw.tobytes() if raw.nbytes < (64 << 20) else memoryview(raw))
         self.pos = pos + raw.nbytes
         return {"offset": pos, "nbytes": int(raw.nbytes)}
 
-    def tensor(self, name: str, data: np.ndarray, dtype: str):
+    def tensor(self, name: str, data: np.ndarray, dtype: str, host_only: bool = False):
+        """host_only: read by the CPU only (may span chunks; never handed to the GPU)."""
         if name in self.entries:
             raise KeyError(f"duplicate tensor {name}")
-        e = self._write(data)
+        e = self._write(data, host_only)
         e.update({"shape": list(data.shape), "dtype": dtype})
+        if host_only:
+            e["host_only"] = True
         self.entries[name] = e
 
     def linear(self, name: str, fmt: str, N: int, K: int, w: np.ndarray, sw: np.ndarray | None,
@@ -94,7 +100,8 @@ class Writer:
         self.entries[name] = e
 
     def close(self):
-        header = json.dumps({"meta": self.meta, "tensors": self.entries}, separators=(",", ":")).encode()
+        header = json.dumps({"meta": self.meta, "chunk": CHUNK, "tensors": self.entries},
+                            separators=(",", ":")).encode()
         if 16 + len(header) > DATA_START:
             raise ValueError("header does not fit the reserved region")
         self.f.seek(0)
@@ -123,13 +130,15 @@ class WeightFile:
         hdr = read_header(path)
         self.meta = hdr["meta"]
         self.entries = hdr["tensors"]
-        self.map = Mapping(gpu, path, CHUNK)
+        self.map = Mapping(gpu, path, hdr.get("chunk", 2 << 30))
 
     def __contains__(self, name):
         return name in self.entries
 
     def tensor(self, name: str) -> Tensor:
         e = self.entries[name]
+        if e.get("host_only"):
+            raise ValueError(f"{name} is stored for the CPU only")
         return self.map.tensor(e["offset"], tuple(e["shape"]), e["dtype"])
 
     def host(self, name: str) -> np.ndarray:

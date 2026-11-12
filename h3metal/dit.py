@@ -226,6 +226,7 @@ class DiT:
             g1 = self.gate_attn.view((3, D), offset_elems=o * 3 * D)
             g2 = self.gate_mlp.view((3, D), offset_elems=o * 3 * D)
             self._block(b, blk, S, x, mod1, mod2, g1, g2, b["rt"], self.rot, 2 * D, D)
+            g.commit()  # one command buffer per block: only its weights are pinned while it runs
         # Output norm and this step's head, over the image rows.
         fm = self.final_mod.view((3, 2, D), offset_elems=s * L3)
         y = b["y"]

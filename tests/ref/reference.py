@@ -45,7 +45,7 @@ class Shards:
         return [k for k in ks if k.startswith(prefix)]
 
 
-def text_encoder(W, ids, dev, dtype, layers=50):
+def text_encoder(W, ids, dev, dtype, layers=50, pos3=None, vision=None, vision_rows=None, deepstack=None):
     cfg = Qwen3VLConfig.from_pretrained(os.path.join(W, "text_encoder"))
     tc = cfg.text_config
     tc._attn_implementation = "sdpa"
@@ -53,9 +53,12 @@ def text_encoder(W, ids, dev, dtype, layers=50):
     pre = "model.language_model"
     T = len(ids)
     emb = sh.get(f"{pre}.embed_tokens.weight")[torch.tensor(ids)]
+    if vision is not None:
+        emb[torch.from_numpy(vision_rows)] = torch.from_numpy(vision).to(emb.dtype)
     h = emb.to(dev, dtype)[None]
     rot = qm.Qwen3VLTextRotaryEmbedding(tc).to(dev)
-    pos = torch.arange(T, device=dev)[None].expand(3, 1, T)
+    pos = torch.arange(T, device=dev)[None].expand(3, 1, T) if pos3 is None else \
+        torch.from_numpy(pos3).to(dev)[:, None, :]
     pe = rot(h, pos)
     mask = torch.full((T, T), float("-inf"), device=dev).triu(1)[None, None].to(dtype)
     layer = qm.Qwen3VLTextDecoderLayer(tc, 0).to(dev, dtype).eval()
@@ -67,7 +70,51 @@ def text_encoder(W, ids, dev, dtype, layers=50):
             h = layer(h, attention_mask=mask, position_ids=pos[0], position_embeddings=pe)
             if isinstance(h, tuple):
                 h = h[0]
+            if deepstack is not None and i < len(deepstack):
+                rows = torch.from_numpy(vision_rows).to(dev)
+                h[0, rows] = h[0, rows] + torch.from_numpy(deepstack[i]).to(dev, h.dtype)
     return h[0].to(torch.bfloat16)  # the pipeline casts to the encoder's dtype
+
+
+def edit_text_encoder(W, prompt, image_path, dev, dtype):
+    """The edit presentation through the official processor, vision tower and (streamed) decoder layers."""
+    from PIL import Image
+    from diffusers.image_processor import VaeImageProcessor
+    from diffusers.modular_pipelines.minimax_h3_image.before_encoder import bound_short_edge
+    from transformers import AutoProcessor
+    image = Image.open(image_path).convert("RGB")
+    proc = VaeImageProcessor(vae_scale_factor=16, do_normalize=False)
+    size = bound_short_edge(*image.size, 1024, 1024, 32)
+    vis = image if image.size == size else proc.resize(image, height=size[1], width=size[0])
+    processor = AutoProcessor.from_pretrained(os.path.join(W, "processor"))
+    tok = AutoTokenizer.from_pretrained(os.path.join(W, "tokenizer"))
+    v = processor.image_processor(images=[vis], return_tensors="pt")
+    cfg = Qwen3VLConfig.from_pretrained(os.path.join(W, "text_encoder"))
+    vm = qm.Qwen3VLVisionModel._from_config(cfg.vision_config).to(dtype).eval()
+    sh = Shards(os.path.join(W, "text_encoder"))
+    vm.load_state_dict({k[len("model.visual."):]: sh.get(k) for k in sh.keys_with("model.visual.")})
+    vm.to(dev)
+    with torch.no_grad():
+        vo = vm(v["pixel_values"].to(dev, dtype), grid_thw=v["image_grid_thw"].to(dev))
+    ids, tags = [], []
+    for i, grid in enumerate(v["image_grid_thw"]):
+        lab = tok(f"Picture {i + 1}: ", add_special_tokens=False)["input_ids"]
+        vb = [tok.convert_tokens_to_ids("<|vision_start|>")] + [tok.convert_tokens_to_ids("<|image_pad|>")] * \
+            (int(grid.prod()) // processor.image_processor.merge_size ** 2) + [tok.convert_tokens_to_ids("<|vision_end|>")]
+        ids += lab + vb
+        tags += [1] * len(lab) + [0] * len(vb)
+    pids = tok(prompt, add_special_tokens=False)["input_ids"][:4096]
+    ids += pids
+    tags += [1] * len(pids)
+    mm = torch.tensor(processor.create_mm_token_type_ids([ids]))
+    full = qm.Qwen3VLModel.__new__(qm.Qwen3VLModel)
+    torch.nn.Module.__init__(full)
+    full.config = cfg
+    pos, _ = qm.Qwen3VLModel.get_rope_index(full, torch.tensor([ids]), mm, image_grid_thw=v["image_grid_thw"])
+    rows = np.nonzero(np.array(ids) == tok.convert_tokens_to_ids("<|image_pad|>"))[0]
+    emb = text_encoder(W, ids, dev, dtype, pos3=pos[:, 0].numpy(), vision=vo.pooler_output.float().cpu().numpy(),
+                       vision_rows=rows, deepstack=[d.float().cpu().numpy() for d in vo.deepstack_features])
+    return ids, tags, emb
 
 
 def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
@@ -171,6 +218,7 @@ def main():
     ap.add_argument("--device", default="mps")
     ap.add_argument("--te-only", action="store_true")
     ap.add_argument("--emb", help="reuse prompt embeddings from this npz")
+    ap.add_argument("--image", help="reference image: computes the edit presentation's embeddings (with --te-only)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     dev, dtype = torch.device(a.device), {"bf16": torch.bfloat16, "fp32": torch.float32}[a.dtype]
@@ -183,6 +231,11 @@ def main():
     t = time.time()
     if a.emb:
         emb = torch.from_numpy(np.load(a.emb)["emb"]).to(torch.bfloat16)
+    elif a.image:
+        ids, tags, emb = edit_text_encoder(a.weights, a.prompt, a.image, dev, dtype)
+        emb = emb.cpu()
+        res["ids"], res["tags"] = np.array(ids), np.array(tags)
+        log(f"edit text encoder {time.time() - t:.0f}s")
     else:
         emb = text_encoder(a.weights, ids, dev, dtype).cpu()
         log(f"text encoder {time.time() - t:.0f}s")
