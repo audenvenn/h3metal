@@ -37,5 +37,8 @@ for s in range(dit.n_steps):
     cos = float((o * ref).sum() / np.linalg.norm(o) / np.linalg.norm(ref))
     worst = max(worst, rel)
     print(f"step {s}: rel L2 err {rel:.4f}  cosine {cos:.6f}")
-assert worst < 0.02, worst
+# 4-bit weights cost this random model ~8.5% on their own (simulated in float with diffusers: the same codes,
+# dequantized): every block normalizes its output before adding it, so weight noise is not damped by small
+# outputs as in MiniMax-H3's transformer. int8 (6.2 GB for the real model) is the default.
+assert worst < (0.02 if fmt == "q8" else 0.12), worst
 print(f"ok ({fmt})")
