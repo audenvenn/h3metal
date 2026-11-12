@@ -139,6 +139,8 @@ def test_cli_sizes_and_device_check():
         except argparse.ArgumentTypeError:
             pass
     assert has_matrix_units("Apple M6") and has_matrix_units("Apple M5 Pro") and not has_matrix_units("Apple M4 Max")
+    from h3metal.cli import auto_format
+    assert [auto_format(g * 2**30) for g in (16, 24, 32, 64)] == ["q4", "mix", "q8", "q8"]
 
 
 if __name__ == "__main__":

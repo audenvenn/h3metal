@@ -105,8 +105,22 @@ def cmd_generate(a):
 FORMAT_ALIASES = {"mix": "q8,q8,q4,q4"}  # int8 attention, int4 MLP
 
 
+def auto_format(memory_bytes: int | None = None) -> str:
+    """The transformer format for this Mac: one that stays resident in its memory (int8 needs ~32 GB; int8
+    attention with int4 MLP fits 24 GB; int4 everywhere 16 GB). Streaming int8 from the SSD keeps up at
+    2048 x 2048 but not at smaller sizes, where a step is too short to hide it."""
+    if memory_bytes is None:
+        import subprocess
+        memory_bytes = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout)
+    gb = memory_bytes / 2**30
+    return "q8" if gb > 24.5 else "mix" if gb > 16.5 else "q4"
+
+
 def cmd_convert(a):
     from .convert import convert_dit
+    if a.dit == "auto":
+        a.dit = auto_format()
+        print(f"transformer format for this Mac: {a.dit} (choose another with --dit)")
     a.dit = FORMAT_ALIASES.get(a.dit, a.dit)
     from .te import convert_te, convert_vision
     from .vae import convert_vae
@@ -182,8 +196,8 @@ def main(argv=None):
     c = sub.add_parser("convert", help="convert the official weights into h3metal's format")
     c.add_argument("src", help="the MiniMax-H3-Image directory (transformer/, text_encoder/, vae/, ...)")
     c.add_argument("--out", default=DEFAULT_MODEL)
-    c.add_argument("--dit", default="q8", help="q8, q4, q4g, mix (int8 attention, int4 MLP) or one per matrix: "
-                   "qkv,out,fc1,fc2 (e.g. q8,q8,q4,q4)")
+    c.add_argument("--dit", default="auto", help="auto (by this Mac's memory), q8, mix (int8 attention, int4 MLP), "
+                   "q4, q4g, or one per matrix: qkv,out,fc1,fc2 (e.g. q8,q8,q4,q4)")
     c.add_argument("--te", default="q8", help="text encoder weights: q8, q4g or f16")
     c.add_argument("--vae", default="f16")
     c.add_argument("--only", help="comma-separated subset of vae,vision,te,dit,tokenizer")
