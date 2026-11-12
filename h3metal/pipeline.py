@@ -225,6 +225,10 @@ def edit_inputs(pipe: "Pipeline", prompt: str, images, draws: _Draws):
         from .vision import VisionTower
         vt = VisionTower(pipe.gpu, wf)
     else:
+        try:
+            import mlx.core  # noqa: F401
+        except ImportError:
+            raise RuntimeError("image editing runs the vision tower on MLX: pip install 'h3metal[edit]'") from None
         vt = edit.VisionTower({k: wf.host(k).astype(np.float32) for k in wf.entries}, wf.meta["config"])
     feats, deep, grids = [], [[], [], []], []
     for im in vis_imgs:
