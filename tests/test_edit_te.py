@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 import numpy as np
 
@@ -36,7 +37,10 @@ def main():
         pipe = Pipeline(d, log=lambda *a: None)
         ids, types, pos3, rows, feats, deep, _ = edit_inputs(pipe, prompt, [Image.open(image)], _Draws(0))
         wf = WeightFile(pipe.gpu, pipe.paths["te"])
-        h = TextEncoder(pipe.gpu, wf).encode(ids, pos3=pos3, vision=feats, vision_rows=rows, deepstack=deep)
+        te = TextEncoder(pipe.gpu, wf)
+        t = time.time()
+        h = te.encode(ids, pos3=pos3, vision=feats, vision_rows=rows, deepstack=deep)
+        dt = time.time() - t
         wf.close()
     finally:
         shutil.rmtree(d)
@@ -52,7 +56,7 @@ def main():
     vis[rows] = True
     rv = np.linalg.norm(h[vis] - ref[vis]) / np.linalg.norm(ref[vis])
     rt = np.linalg.norm(h[~vis] - ref[~vis]) / np.linalg.norm(ref[~vis])
-    print(f"hidden_states[50]: rel error {rel:.4f} (vision rows {rv:.4f}, text rows {rt:.4f}); "
+    print(f"hidden_states[50] ({te.fmt}, {dt:.1f} s): rel error {rel:.4f} (vision rows {rv:.4f}, text rows {rt:.4f}); "
           f"token cosine mean {cos.mean():.5f} min {cos.min():.5f}")
     assert cos.mean() > 0.99, "the edit presentation does not match the reference"
 
