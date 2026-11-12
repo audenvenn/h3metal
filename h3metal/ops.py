@@ -87,6 +87,20 @@ def attention(gpu: Gpu, q: Tensor, k: Tensor, v: Tensor, out: Tensor, *, Lq: int
     gpu.launch(kern, (math.ceil(Lq / (16 * wm)), H, 1), (32 * wm, 1, 1), [q, k, v, out, None, q_scale, k_scale],
                params, params_index=4)
 
+def attention_q8(gpu: Gpu, q: Tensor, k: Tensor, v: Tensor, out: Tensor, *, Lq: int, L: int, H: int, KVH: int,
+                 D: int, q_rows: int, k_rows: int, scale: float, q_scale: Tensor, k_scale: Tensor, wm: int = 16,
+                 bk: int = 32, qr: int = 2, seq_heads: int | None = None, seq_rows: int = 0, **variant):
+    """attention() with int8 queries and keys (kernels/attention2.metal): qr fragments of 16 query rows per
+    SIMD-group, the score product accumulated in float, the query scale applied inside the exponent."""
+    import math
+    out_t = OUT_DT[out.dtype]
+    kern = gpu.kernel("attention2.metal", "attention_q8", HD=D, WM=wm, BK=bk, QR=qr, O_T=out_t, **variant)
+    sh = seq_heads or H
+    params = pack("7if3i", Lq, L, H, KVH, q_rows, k_rows, sh * D, scale * 1.4426950408889634, 0, sh, seq_rows)
+    gpu.launch(kern, (math.ceil(Lq / (16 * qr * wm)), H, 1), (32 * wm, 1, 1), [q, k, v, out, None, q_scale, k_scale],
+               params, params_index=4)
+
+
 def _rows_kernel_cfg(D: int):
     """SIMD-groups and rotation blocks per SIMD-group for a row of D channels."""
     nb = D // 256
