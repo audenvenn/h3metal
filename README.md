@@ -93,8 +93,9 @@ Images come out as `uint8` arrays; `timing` says where the time went.
 - **Flash attention** with the operands in registers, the score product in
   int8, and the output's rescale skipped whenever no row's maximum moved.
 - **One command buffer per block** over memory-mapped weights: only the block
-  that runs is pinned, so the transformer runs in TBD GB and the 26 GB text
-  encoder streams from the SSD with a footprint of half a gigabyte.
+  that runs is pinned. The 26 GB text encoder streams from the SSD with a
+  footprint of half a gigabyte, and a transformer larger than the Mac's
+  memory streams its blocks while others compute.
 - **GPTQ** chooses the 4-bit codes against real denoising trajectories.
 
 [docs/design.md](docs/design.md) has the details, including what was tried
@@ -102,21 +103,20 @@ and did not pay.
 
 ## Weight formats
 
-`h3metal convert` writes the transformer in int8 by default; `--dit mix`
-(int8 attention, int4 MLP) and `--dit q4` make it smaller. Text encoder,
-vision tower and VAE are the same for all of them.
+`h3metal convert` picks the transformer's format from the Mac's memory
+(`--dit auto`), so that it stays in memory; text encoder, vision tower and
+VAE are the same for all formats.
 
-| `--dit` | Transformer | 2048 x 2048, 6 steps (M6, 24 GB) | Quality |
-|---|---:|---:|---|
-| `q8` (default) | 20.8 GB | 40.3 s | TBD |
-| `mix` | 14.9 GB | 42.8 s | TBD |
+| `--dit` | Transformer | Chosen on | 1024 x 1024 | 2048 x 2048 | Quality |
+|---|---:|---|---:|---:|---|
+| `q8`: int8 | 20.8 GB | more than 24 GB | TBD | TBD | TBD |
+| `mix`: int8 attention, int4 MLP | 14.9 GB | 24 GB | 12.3 s | 42.8 s | TBD |
+| `q4`: int4 | 10.8 GB | 16 GB | | | |
 
-int8 is the default because it is both the closest to the official
-pipeline and the fastest: on a 24 GB Mac it does not fit in memory, so the
-engine keeps as many blocks resident as fit and streams the rest from the
-SSD while the others compute, and its int8 x int8 products run faster than
-int4's. `mix` stays entirely in memory, which helps on Macs with less memory
-and at small sizes, where a step is too short to hide the SSD.
+Times are the transformer's six steps on the M6 (24 GB). There int8 does not
+fit in memory: the engine streams its blocks from the SSD while others
+compute, which keeps up at 2048 x 2048 (40.3 s) but not at 1024 x 1024
+(37.8 s, against 12.3 s for `mix`).
 
 The text encoder keeps int8 weights with half-precision activations: its
 output is within 0.37% of the official module run in float32 (mean over
