@@ -113,9 +113,11 @@ runs is pinned, and the kernel pages the rest in and out as needed. With
 The text encoder is mapped while it runs and released before the transformer
 starts; it, too, commits one layer at a time, so its 26 GB of int8 weights
 stream from the SSD in 4-5 seconds with a footprint of about half a
-gigabyte. Its products take int8 weights with half-precision activations
-(the int8 path, `H3METAL_TE_ACT=i8`, is faster on long prompts but less
-accurate). Prompt embeddings are cached on disk (`~/.h3metal/cache`), so a
+gigabyte. Its products take int8 weights with half-precision activations:
+against the official module run in float32, its output (hidden_states[50])
+is within 0.47% (relative L2 error; mean per-token cosine 0.99995). The
+int8-activation path (`H3METAL_TE_ACT=i8`) is faster on long prompts and
+within 1.4%. Prompt embeddings are cached on disk (`~/.h3metal/cache`), so a
 repeated prompt skips the text encoder.
 
 ## VAE
