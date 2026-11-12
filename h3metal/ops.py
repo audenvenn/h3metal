@@ -60,6 +60,10 @@ def gemm(gpu: Gpu, a: Tensor, wt: QWeight, out: Tensor, M: int, *, sa: Tensor | 
                  gate=gate, g_stride=g_stride, c_stride=c_stride, a_stride=a_stride or wt.K, tile=tile, swz=swz)
         return
     tm, tn, nsg = tile
+    # 32 x 512 tiles (8 SIMD-groups) gave wrong results with int8 weights while looking fastest in a sweep;
+    # until that is understood, nothing wider than 256 columns runs. tests/test_gemm.py checks every tile used.
+    if tn > 256:
+        raise ValueError(f"gemm tile {tile}: tiles wider than 256 columns are not supported")
     out_t = OUT_DT[out.dtype] if epi == 0 else "float"
     k = gpu.kernel("gemm.metal", "gemm", WFMT=FMT_ID[wt.fmt], EPI=epi, OUT_T=out_t, TM=tm, TN=tn, NSG=nsg,
                    G=wt.G, HAS_BIAS=int(wt.bias is not None),

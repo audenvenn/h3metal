@@ -87,6 +87,47 @@ def check(fmt, M=200, N=256, K=512, epi=0, out_dtype="f16", seed=0, tile=(64, 12
     assert err < (2e-3 if out_dtype != "bf16" else 1e-2), err
 
 
+def check_dit_tiles():
+    """Every tile and dispatch split the transformer uses (h3metal/dit.py: _tile), at its real shapes and row
+    counts (1024, 2048 and 4096 pixels square), against a float64 reference on a sample of rows."""
+    from h3metal.dit import _tile
+    D, inner, F = 5376, 7168, 14336
+    gpu = Gpu()
+    rng = np.random.default_rng(1)
+    for fmt in ("q8", "q4"):
+        for name, K, N, epi in (("qkv", D, 3 * inner, 0), ("out", inner, D, 1), ("fc1", D, 2 * F, 0),
+                                ("fc2", F, D, 1)):
+            for M in (1324, 4396, 16684):
+                cfg = _tile(QWeight(fmt, None, None, N, K), M)
+                m_pad = (M + 127) // 128 * 128
+                a = rng.integers(-127, 128, size=(m_pad, K), dtype=np.int8)
+                sa = rng.uniform(0.001, 0.01, size=m_pad).astype(np.float32)
+                q = rng.integers(-127, 128, size=(N, K), dtype=np.int8) if fmt == "q8" else \
+                    rng.integers(-8, 8, size=(N, K)).astype(np.int8)
+                sw = rng.uniform(0.001, 0.01, size=N).astype(np.float32)
+                wt = QWeight(fmt, gpu.upload(q if fmt == "q8" else pack_int4(q)), gpu.upload(sw), N, K)
+                rows = np.unique(np.r_[0:40, M - 40:M, rng.integers(0, M, 64)])
+                ref = (a[rows].astype(np.float64) @ q.T.astype(np.float64)) * sa[rows, None] * sw[None, :]
+                if epi == 0:
+                    out = gpu.empty((m_pad, N), "f16")
+                    gemm(gpu, gpu.upload(a), wt, out, M, sa=gpu.upload(sa), **cfg)
+                    gpu.wait()
+                    got = out.numpy()[rows].astype(np.float64)
+                else:
+                    x0 = rng.standard_normal((m_pad, N)).astype(np.float32)
+                    types = rng.integers(0, 3, size=m_pad).astype(np.uint8)
+                    gates = rng.standard_normal((3, N)).astype(np.float32)
+                    X = gpu.upload(x0)
+                    gemm(gpu, gpu.upload(a), wt, X, M, sa=gpu.upload(sa), epi=1, rtype=gpu.upload(types),
+                         gate=gpu.upload(gates), **cfg)
+                    gpu.wait()
+                    got = X.numpy()[rows].astype(np.float64)
+                    ref = x0[rows].astype(np.float64) + gates[types[rows]] * ref
+                err = np.abs(got - ref).max() / (np.abs(ref).max() + 1e-12)
+                print(f"{fmt} {name:3s} M={M:5d} {cfg}: max rel err {err:.2e}")
+                assert err < 2e-3, (fmt, name, M, cfg, err)
+
+
 if __name__ == "__main__":
     for fmt in ("q8", "q4", "q4g", "f16", "h8", "h4", "h4g"):
         check(fmt)
@@ -97,4 +138,5 @@ if __name__ == "__main__":
     for fmt in ("q8", "q4", "h8", "h4"):  # K in two dispatches, accumulated into the residual
         check(fmt, epi=1, K=1024, ksplit=2)
     check("q8", epi=1, K=2048, ksplit=4, tile=(64, 256, 8))
+    check_dit_tiles()
     print("ok")

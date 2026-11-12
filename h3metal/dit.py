@@ -287,8 +287,8 @@ class DiT:
 def _tile(w, M: int = 4096) -> dict:
     """Tile shape and dispatch order per product, from an interleaved sweep on an M6 (bench/gemm_bench.py)."""
     if w.fmt == "q8":
-        if w.K >= 12000:                      # fc2: wide tiles, K over four (~2048 x 2048) or two dispatches
-            return {"tile": (32, 512, 8), "ksplit": 4 if M >= 2048 else 2}
+        if w.K >= 12000:                      # fc2: K over four dispatches from 2048 x 2048 up, two below
+            return {"tile": (32, 256, 4), "ksplit": 4 if M >= 2048 else 2}
         if w.K >= 7000:                       # attention output
             if M < 2048:
                 return {"tile": (32, 128, 2)}
