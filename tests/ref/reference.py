@@ -40,9 +40,15 @@ class Shards:
             self.open[fn] = safe_open(os.path.join(self.d, fn), "pt")
         return self.open[fn].get_tensor(k)
 
+    def keys(self):
+        if self.wm:
+            return list(self.wm.keys())
+        if self.single not in self.open:
+            self.open[self.single] = safe_open(os.path.join(self.d, self.single), "pt")
+        return list(self.open[self.single].keys())
+
     def keys_with(self, prefix):
-        ks = self.wm.keys() if self.wm else []
-        return [k for k in ks if k.startswith(prefix)]
+        return [k for k in self.keys() if k.startswith(prefix)]
 
 
 def text_encoder(W, ids, dev, dtype, layers=50, pos3=None, vision=None, vision_rows=None, deepstack=None):
