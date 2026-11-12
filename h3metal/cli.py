@@ -67,8 +67,12 @@ def cmd_generate(a):
         print(f"{out}: {w}x{h}, seed {seed}; {timing}; wall {time.time() - (t0 if i == 0 else t1):.1f}s")
 
 
+FORMAT_ALIASES = {"mix": "q8,q8,q4,q4"}  # int8 attention, int4 MLP
+
+
 def cmd_convert(a):
     from .convert import convert_dit
+    a.dit = FORMAT_ALIASES.get(a.dit, a.dit)
     from .te import convert_te, convert_vision
     from .vae import convert_vae
     os.makedirs(a.out, exist_ok=True)
@@ -143,7 +147,8 @@ def main(argv=None):
     c = sub.add_parser("convert", help="convert the official weights into h3metal's format")
     c.add_argument("src", help="the MiniMax-H3-Image directory (transformer/, text_encoder/, vae/, ...)")
     c.add_argument("--out", default=DEFAULT_MODEL)
-    c.add_argument("--dit", default="q8", help="q8, q4, q4g or one per matrix: qkv,out,fc1,fc2 (e.g. q8,q8,q4,q4)")
+    c.add_argument("--dit", default="q8", help="q8, q4, q4g, mix (int8 attention, int4 MLP) or one per matrix: "
+                   "qkv,out,fc1,fc2 (e.g. q8,q8,q4,q4)")
     c.add_argument("--te", default="q8", help="text encoder weights: q8, q4g or f16")
     c.add_argument("--vae", default="f16")
     c.add_argument("--only", help="comma-separated subset of vae,vision,te,dit,tokenizer")
