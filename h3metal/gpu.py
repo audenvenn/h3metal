@@ -63,6 +63,7 @@ def _load():
         "h3_map_chunk": (vp, [vp, i32]),
         "h3_map_data": (vp, [vp]),
         "h3_map_advise": (i32, [vp, u64, u64, i32]),
+        "h3_map_touch": (u64, [vp, u64, u64]),
         "h3_map_close": (None, [vp]),
         "h3_pipeline": (vp, [vp, cp, cp, cp]),
         "h3_pipeline_max_threads": (i32, [vp]),
@@ -287,6 +288,10 @@ class Mapping:
 
     def advise(self, offset: int, length: int, advice: int):
         lib().h3_map_advise(self.handle, offset, length, advice)
+
+    def touch(self, offset: int, length: int):
+        """Reads a byte of every page from the CPU (the GPU's reads do not mark pages as recently used)."""
+        lib().h3_map_touch(self.handle, offset, length)
 
     def close(self):
         if self.handle:

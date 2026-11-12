@@ -183,6 +183,14 @@ class WeightFile:
         """Tell the kernel these entries' pages are the first to evict (they are read again from the file)."""
         self._advise(names, 4)
 
+    def touch(self, names):
+        """Mark these entries' pages as recently used, reading back any that were evicted."""
+        for name in names:
+            e = self.entries[name]
+            parts = [e] if "offset" in e else [e[k] for k in ("w", "sw", "bias") if k in e]
+            for p in parts:
+                self.map.touch(p["offset"], p["nbytes"])
+
     def nbytes(self, names) -> int:
         total = 0
         for name in names:

@@ -47,6 +47,7 @@ int h3_map_chunks(h3_map *m);
 void *h3_map_chunk(h3_map *m, int i);
 const void *h3_map_data(h3_map *m);
 // advice: 0 normal, 1 will need (read ahead), 2 sequential, 3 random. Returns 0 on success.
+uint64_t h3_map_touch(h3_map *m, uint64_t offset, uint64_t length);
 int h3_map_advise(h3_map *m, uint64_t offset, uint64_t length, int advice);
 void h3_map_close(h3_map *m);
 

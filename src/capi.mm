@@ -165,6 +165,17 @@ int h3_map_advise(h3_map *m, uint64_t offset, uint64_t length, int advice) {
   return madvise((uint8_t *)m->data + a, b - a, adv);
 }
 
+// Reads one byte of every page in the range from the CPU, so the kernel counts the pages as recently used
+// (the GPU's reads do not); pages that were evicted are read back in. Returns a checksum nobody needs.
+uint64_t h3_map_touch(h3_map *m, uint64_t offset, uint64_t length) {
+  const size_t page = h3::Metal::page_size();
+  const uint64_t b = std::min<uint64_t>(offset + length, m->mapped);
+  const volatile uint8_t *p = (const volatile uint8_t *)m->data;
+  uint64_t sum = 0;
+  for (uint64_t x = offset / page * page; x < b; x += page) sum += p[x];
+  return sum;
+}
+
 void h3_map_close(h3_map *m) {
   if (!m) return;
   m->chunks.clear();

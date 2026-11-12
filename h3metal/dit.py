@@ -253,6 +253,12 @@ class DiT:
         L3 = 3 * 2 * D  # elements per (step, layer) in the modulation tables
         self._prefetch(0)
         self._prefetch(1)
+        if 0 < s and self.resident < self.L:  # from the second step on: the first one loads them
+            # The GPU's reads do not count as uses, so the kernel cannot tell the resident blocks from the
+            # streamed ones; a CPU read of each of their pages, on a separate thread, keeps them resident.
+            import threading
+            names = [f"blocks.{i}.{k}" for i in range(self.resident) for k in ("qkv", "out", "fc1", "fc2")]
+            threading.Thread(target=self.wf.touch, args=(names,), daemon=True).start()
         for l, blk in enumerate(self.blocks):
             self._prefetch(l + 2)
             if l - 2 >= self.resident:  # two blocks back: finished, or at least wired by its command buffer
