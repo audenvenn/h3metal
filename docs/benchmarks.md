@@ -39,7 +39,36 @@ Method (`bench/speed.py`):
   requested size (by default both MiniMax's pipeline and h3metal generate a
   1024 x 1024 request on a 2048 x 2048 canvas).
 
-TBD
+`bench_run`: `bench/speed.py --sizes 1024,2048 --runs 2 --warmup`, then
+`--sizes 2048 --runs 1 --cold` and `--sizes 4096 --runs 1`, with h3metal's
+default formats for a 24 GB Mac (int8 attention, int4 MLP) and the prompt
+"A red fox sitting in fresh snow at sunrise, photorealistic, soft golden
+light.", seed 42. Means of two runs (one at 4096 x 4096):
+
+| Size | h3metal | h3-image-mlx | Speed-up | h3metal peak footprint | h3-image-mlx peak footprint |
+|---|---:|---:|---:|---:|---:|
+| 1024 x 1024 | 10.1 s | 45.7 s | 4.5x | 0.6 GB | 2.5 GB |
+| 2048 x 2048 | 41.2 s | 115.4 s | 2.8x | 2.6 GB | 2.9 GB |
+| 2048 x 2048, new prompt | 46.5 s | 118.1 s | 2.5x | 2.6 GB | 2.9 GB |
+| 4096 x 4096 | 244.2 s | 458.3 s | 1.9x | 5.4 GB | 6.9 GB |
+
+Single runs: h3metal 11.0 and 9.2 s at 1024 x 1024, 40.8 and 41.5 s at
+2048 x 2048; h3-image-mlx 45.7 and 45.7 s, 115.3 and 115.5 s.
+
+With int8 weights throughout, like h3-image-mlx's, h3metal takes 44.9 and
+45.0 s at 2048 x 2048 (2.6x). Those two runs were made on their own right
+after the comparison, with the same warm-up and pauses.
+
+Neither implementation holds the whole transformer in its own memory on
+this Mac. h3metal maps its weight files, which macOS keeps in its file
+cache, and a process's footprint does not count that cache; h3-image-mlx
+loads the transformer one block at a time. The footprints are what each
+process allocates beyond that.
+
+At the same seed the two draw nearly the same picture (h3metal on the
+left), the differences coming from their different quantizations:
+
+![The same prompt and seed, h3metal and h3-image-mlx](images/same_seed.jpg)
 
 ## Kernels
 
