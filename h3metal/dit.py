@@ -289,10 +289,8 @@ def _tile(w, M: int = 4096) -> dict:
     if w.fmt == "q8":
         if w.K >= 12000:                      # fc2: K over four dispatches from 2048 x 2048 up, two below
             return {"tile": (32, 256, 4), "ksplit": 4 if M >= 2048 else 2}
-        if w.K >= 7000:                       # attention output
-            if M < 2048:
-                return {"tile": (32, 128, 2)}
-            return {"tile": (32, 256, 4), "ksplit": 2} if M < 8192 else {"tile": (64, 256, 8)}
+        if w.K >= 7000:                       # attention output: two K slices from 2048 x 2048 up
+            return {"tile": (32, 128, 2)} if M < 2048 else {"tile": (32, 256, 4), "ksplit": 2}
         return {"tile": (64, 256, 8), "swz": 2 if M >= 2048 else 1}   # qkv, fc1
     if w.fmt == "q4":
         if w.K >= 12000:                      # fc2
