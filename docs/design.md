@@ -108,8 +108,15 @@ Weight files (`.h3m`) are mapped read-only and handed to Metal without a copy,
 in 1 GiB buffers. Metal pins every buffer a command buffer references, so the
 engine submits one command buffer per transformer block: only the block that
 runs is pinned, and the kernel pages the rest in and out as needed. With
-4-bit weights the transformer takes 10 GB and stays resident; 8-bit weights
-(19 GB) can be streamed, the next block read ahead while the current one runs.
+4-bit weights the transformer takes 10 GB, with int8 attention and int4 MLP
+13.5 GB, and either stays resident on a 24 GB Mac. Int8 weights (19.3 GB) do
+not fit there, and plain least-recently-used eviction would then read the
+whole file again at every step, since every block is used once per step in
+the same order. So the engine keeps as many blocks resident as Metal's
+working-set estimate allows (less room for activations) and streams only the
+rest: each streamed block is read two blocks ahead and marked for eviction
+(`MADV_DONTNEED`) right after use, so the kernel drops those pages rather
+than the resident ones.
 The text encoder is mapped while it runs and released before the transformer
 starts; it, too, commits one layer at a time, so its 26 GB of int8 weights
 stream from the SSD in 4-5 seconds with a footprint of about half a
