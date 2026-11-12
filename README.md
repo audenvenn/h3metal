@@ -53,7 +53,10 @@ h3metal generate -p PROMPT [-s SIZE] [--seed N] [-n COUNT] [-o OUT.png] [-i REF.
   encoded once. Prompt embeddings are cached on disk (`~/.h3metal/cache`), so
   a repeated prompt skips the text encoder.
 - `-i` makes it an edit. Repeat it for several references and name them
-  `<Picture 1>`, `<Picture 2>`, ... in the prompt.
+  `<Picture 1>`, `<Picture 2>`, ... in the prompt. References can be PNG, JPEG,
+  WebP or anything else macOS opens, HEIC photos included.
+- PNG output carries the prompt, seed and size, and says that the image is
+  AI-generated, as the model's license asks.
 - The very first run compiles the Metal kernels, which adds a few seconds;
   macOS caches them for later runs.
 
