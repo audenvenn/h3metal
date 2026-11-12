@@ -114,9 +114,43 @@ def trajectory(ref: dict, sigmas) -> list[np.ndarray]:
     return out
 
 
-def calibrate(src: str, base: str, out: str, refs: list[str], fmt: str = "q4", log=print):
-    """Rewrites the blocks of `base` (a converted DiT) into `out` with GPTQ codes in `fmt` (q4 or q8)."""
-    bits = 4 if fmt == "q4" else 8
+def record_run(dit_path: str, emb: np.ndarray, canvas, seed: int, out: str):
+    """A calibration run made with the engine itself (any converted DiT, int8 in practice): the text embeddings,
+    the starting noise and every step's velocity, in the format reference runs are saved in (what calibrate()
+    reads). Much faster than a reference run of the official modules, and as good for collecting statistics."""
+    from .rng import TorchRandn
+    g = Gpu()
+    wf = WeightFile(g, dit_path)
+    m = ditm.DiT(g, wf)
+    T = emb.shape[0]
+    text = g.empty((ops.pad_rows(T, 128), emb.shape[1]), "bf16")
+    text.numpy()[:T] = bf16_bits(emb)
+    rows = m.encode_text(text, T)
+    ch, cw = (int(v) for v in canvas)
+    lh, lw = ch // 16, cw // 16
+    C = m.cfg["latents"]
+    m.prepare(ditm.Layout(T, np.ones(T, np.uint8), [], lh, lw))
+    noise = TorchRandn(seed).normal((1, C, 1, lh, lw))
+    x = ditm.patchify(noise.reshape(C, lh, lw))
+    vels = {}
+    for s in range(m.n_steps):
+        v = m.step(s, rows, x)
+        vels[f"vel{s}"] = v
+        x = ditm.euler(x, v, s, m.sigmas)
+    np.savez(out, emb=emb.astype(np.float32), noise=noise, canvas=np.array([ch, cw]), **vels)
+    m.free()
+    wf.close()
+
+
+def calibrate(src: str, base: str, out: str, refs: list[str], fmt="q4", log=print):
+    """Rewrites the blocks of `base` (a converted DiT) into `out` with GPTQ codes.
+
+    fmt: "q4" or "q8" for all four products, or one per product, e.g.
+    {"qkv": "q8", "out": "q8", "fc1": "q4", "fc2": "q4"}.
+    """
+    fmts = dict(fmt) if isinstance(fmt, dict) else {k: fmt for k in ("qkv", "out", "fc1", "fc2")}
+    if set(fmts) != {"qkv", "out", "fc1", "fc2"} or not set(fmts.values()) <= {"q4", "q8"}:
+        raise ValueError(f"formats per product must be q4 or q8: {fmt}")
     g = Gpu()
     wf = WeightFile(g, base)
     model = ditm.DiT(g, wf)
@@ -141,7 +175,7 @@ def calibrate(src: str, base: str, out: str, refs: list[str], fmt: str = "q4", l
             states.append({"x": x, "layout": lay, "step": s})
     log(f"{len(states)} calibration states from {len(refs)} reference runs")
     meta = dict(wf.meta)
-    meta["fmts"] = {k: fmt for k in ("qkv", "out", "fc1", "fc2")}
+    meta["fmts"] = fmts
     meta["gptq"] = {"refs": [os.path.basename(p) for p in refs], "states": len(states)}
     w = Writer(out, meta)
     for name, e in wf.entries.items():  # everything but the blocks' matrices is copied
@@ -177,10 +211,11 @@ def calibrate(src: str, base: str, out: str, refs: list[str], fmt: str = "q4", l
         # 2. GPTQ.
         qw = {}
         for k, m in mats.items():
+            bits = 4 if fmts[k] == "q4" else 8
             q, sc = gptq(m, hs[k].get(), bits)
             codes = q if bits == 8 else pack_int4(q)
-            w.linear(f"{p}.{k}", fmt, m.shape[0], m.shape[1], codes, sc)
-            qw[k] = QWeight(fmt, g.upload(codes), g.upload(sc), m.shape[0], m.shape[1])
+            w.linear(f"{p}.{k}", fmts[k], m.shape[0], m.shape[1], codes, sc)
+            qw[k] = QWeight(fmts[k], g.upload(codes), g.upload(sc), m.shape[0], m.shape[1])
         del hw, mats
         # 3. The next block's states, through the engine's kernels with the quantized matrices.
         for st_ in states:
