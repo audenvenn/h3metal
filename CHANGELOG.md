@@ -20,8 +20,10 @@ All notable changes to this project are documented here. The format follows
   MLP product split over two accumulating dispatches.
 - The text encoder streamed from the SSD one layer at a time (about half a
   gigabyte resident), and prompt embeddings cached on disk.
-- The VAE encoder of edits on the engine: convolutions as im2col and
-  half-precision products on the matrix units.
+- Everything an edit needs on the engine too: the Qwen3-VL vision tower
+  (0.6 s per reference) and the VAE encoder (convolutions as im2col and
+  half-precision products). The package depends on NumPy, tokenizers and
+  Pillow only.
 - GPTQ calibration of the 4-bit weights on denoising trajectories, with a
   format per product (e.g. int8 attention, int4 MLP).
 - `h3metal download`, `convert`, `generate` and `info`; a Python API

@@ -220,16 +220,9 @@ def edit_inputs(pipe: "Pipeline", prompt: str, images, draws: _Draws):
             raise ValueError(f"a reference image needs at least 32 pixels on each side, got {im.size}")
     vae_imgs = [edit.resize_image(im, 1024, 2048) for im in imgs]
     vis_imgs = [edit.resize_image(im, 1024, 1024) for im in imgs]
+    from .vision import VisionTower
     wf = WeightFile(pipe.gpu, pipe.paths["vision"])
-    if os.environ.get("H3METAL_VISION", "mlx") == "engine":
-        from .vision import VisionTower
-        vt = VisionTower(pipe.gpu, wf)
-    else:
-        try:
-            import mlx.core  # noqa: F401
-        except ImportError:
-            raise RuntimeError("image editing runs the vision tower on MLX: pip install 'h3metal[edit]'") from None
-        vt = edit.VisionTower({k: wf.host(k).astype(np.float32) for k in wf.entries}, wf.meta["config"])
+    vt = VisionTower(pipe.gpu, wf)
     feats, deep, grids = [], [[], [], []], []
     for im in vis_imgs:
         p, grid = edit.vision_patches(np.asarray(im))
@@ -272,11 +265,6 @@ def edit_inputs(pipe: "Pipeline", prompt: str, images, draws: _Draws):
         ref_lats.append((z - lat_mean) / lat_std)
     del enc
     wf.close()
-    try:
-        import mlx.core as mx
-        mx.clear_cache()
-    except Exception:
-        pass
     return ids, np.array(types, np.uint8), pos3, rows, np.concatenate(feats), \
         [np.concatenate(d) for d in deep], ref_lats
 

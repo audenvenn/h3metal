@@ -160,7 +160,9 @@ reference encodes in about 4 seconds.
 The vision tower of Qwen3-VL (27 layers) turns each reference image into
 the features of its vision block in the text encoder's input, plus three
 DeepStack feature sets that are added to those rows after the first three
-decoder layers. It runs on MLX, about a second per reference. The
+decoder layers. It runs on the same engine, half-precision products with
+float accumulation (the head dim of 72 padded to 96 for the attention
+kernel), 0.6 s for a 1024 x 1024 reference. The
 references then enter the transformer as their own rows, held at
 t = 0.999, ahead of the image rows.
 

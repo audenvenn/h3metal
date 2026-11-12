@@ -23,7 +23,7 @@ GPU runtime). The matrix units h3metal is built for are in M5- and M6-class
 GPUs; it is developed and measured on an M6.
 
 ```sh
-pip install "h3metal[edit] @ git+https://github.com/audenvenn/h3metal"
+pip install "h3metal @ git+https://github.com/audenvenn/h3metal"
 
 h3metal download                       # the official checkpoint, ~125 GB
 h3metal convert ~/.h3metal/checkpoint  # writes ~/.h3metal/model

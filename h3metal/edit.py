@@ -1,11 +1,11 @@
-"""The parts only an edit needs: the Qwen3-VL vision tower (with its DeepStack
-features), which runs once per reference image on MLX, and the multimodal
-positions of the text encoder's input. The VAE encoder is in vae.py.
+"""Inputs of an edit: reference images resized and cut into the vision tower's
+patches, the tower's position tables, and the multimodal positions of the
+text encoder's input. The vision tower itself is in vision.py, the VAE
+encoder in vae.py.
 """
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
 
@@ -79,99 +79,6 @@ def vision_rope(gh: int, gw: int, head_dim: int, theta: float = 10000.0):
     f = np.concatenate([fh, fw], -1)
     f = np.concatenate([f, f], -1)
     return np.cos(f).astype(np.float32), np.sin(f).astype(np.float32)
-
-
-class VisionTower:
-    """Qwen3-VL vision encoder. weights: name -> float array (the checkpoint's model.visual.* without prefix)."""
-
-    def __init__(self, weights: dict, cfg: dict):
-        import mlx.core as mx
-        self.mx = mx
-        self.cfg = cfg
-        self.depth = cfg["depth"]
-        self.heads = cfg["num_heads"]
-        self.dim = cfg["hidden_size"]
-        self.hd = self.dim // self.heads
-        self.ds_index = cfg["deepstack_visual_indexes"]
-        self.side = int(math.isqrt(cfg["num_position_embeddings"]))
-        dt = mx.float16
-        f32 = mx.float32
-        w = {k: mx.array(v) for k, v in weights.items()}
-        pe = w["patch_embed.proj.weight"]
-        self.patch_w = pe.reshape(pe.shape[0], -1).T.astype(dt)
-        self.patch_b = w["patch_embed.proj.bias"].astype(f32)
-        self.pos_embed = w["pos_embed.weight"].astype(f32)
-        self.blocks = []
-        for i in range(self.depth):
-            p = f"blocks.{i}."
-            self.blocks.append({
-                "n1w": w[p + "norm1.weight"].astype(f32), "n1b": w[p + "norm1.bias"].astype(f32),
-                "n2w": w[p + "norm2.weight"].astype(f32), "n2b": w[p + "norm2.bias"].astype(f32),
-                "qkv_w": w[p + "attn.qkv.weight"].T.astype(dt), "qkv_b": w[p + "attn.qkv.bias"].astype(f32),
-                "proj_w": w[p + "attn.proj.weight"].T.astype(dt), "proj_b": w[p + "attn.proj.bias"].astype(f32),
-                "fc1_w": w[p + "mlp.linear_fc1.weight"].T.astype(dt), "fc1_b": w[p + "mlp.linear_fc1.bias"].astype(f32),
-                "fc2_w": w[p + "mlp.linear_fc2.weight"].T.astype(dt), "fc2_b": w[p + "mlp.linear_fc2.bias"].astype(f32),
-            })
-        def merger(p):
-            return {"nw": w[p + "norm.weight"].astype(f32), "nb": w[p + "norm.bias"].astype(f32),
-                    "fc1_w": w[p + "linear_fc1.weight"].T.astype(dt), "fc1_b": w[p + "linear_fc1.bias"].astype(f32),
-                    "fc2_w": w[p + "linear_fc2.weight"].T.astype(dt), "fc2_b": w[p + "linear_fc2.bias"].astype(f32)}
-        self.merger = merger("merger.")
-        self.ds = [merger(f"deepstack_merger_list.{i}.") for i in range(len(self.ds_index))]
-        mx.eval(self.__dict__.get("patch_w"))
-
-    def _lin(self, x, w, b):
-        mx = self.mx
-        return (x.astype(mx.float16) @ w).astype(mx.float32) + b
-
-    def _merge(self, x, m, post: bool):
-        mx = self.mx
-        n = x.shape[0] // (MERGE * MERGE)
-        if post:
-            x = mx.fast.layer_norm(x.reshape(n, -1), m["nw"], m["nb"], 1e-6)
-        else:
-            x = mx.fast.layer_norm(x, m["nw"], m["nb"], 1e-6).reshape(n, -1)
-        x = self._lin(x, m["fc1_w"], m["fc1_b"])
-        x = x * 0.5 * (1.0 + mx.erf(x / math.sqrt(2.0)))  # exact GELU
-        return self._lin(x, m["fc2_w"], m["fc2_b"])
-
-    def __call__(self, patches: np.ndarray, grid):
-        """patches [N][1536] (one image) -> (embeds [N/4][out], [deepstack features])."""
-        mx = self.mx
-        _, gh, gw = grid
-        x = mx.array(patches)
-        x = (x.astype(mx.float16) @ self.patch_w).astype(mx.float32) + self.patch_b
-        idx, wts = pos_interp(gh, gw, self.side)
-        pe = (self.pos_embed[mx.array(idx.reshape(-1))].reshape(-1, 4, self.dim) * mx.array(wts)[:, :, None]).sum(1)
-        x = x + pe
-        cos, sin = (mx.array(a) for a in vision_rope(gh, gw, self.hd))
-        N = x.shape[0]
-        H, hd = self.heads, self.hd
-        feats = []
-        for i, b in enumerate(self.blocks):
-            h = mx.fast.layer_norm(x, b["n1w"], b["n1b"], 1e-6)
-            qkv = self._lin(h, b["qkv_w"], b["qkv_b"]).reshape(N, 3, H, hd)
-            q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
-
-            def rope(t):
-                t1, t2 = t[..., : hd // 2], t[..., hd // 2:]
-                rot = mx.concatenate([-t2, t1], -1)
-                return t * cos[:, None, :] + rot * sin[:, None, :]
-            q, k = rope(q), rope(k)
-            q, k, v = (t.transpose(1, 0, 2)[None].astype(mx.float16) for t in (q, k, v))
-            o = mx.fast.scaled_dot_product_attention(q, k, v, scale=hd ** -0.5)
-            o = o[0].transpose(1, 0, 2).reshape(N, -1).astype(mx.float32)
-            x = x + self._lin(o, b["proj_w"], b["proj_b"])
-            h = mx.fast.layer_norm(x, b["n2w"], b["n2b"], 1e-6)
-            h = self._lin(h, b["fc1_w"], b["fc1_b"])
-            h = 0.5 * h * (1.0 + mx.tanh(math.sqrt(2.0 / math.pi) * (h + 0.044715 * h * h * h)))  # gelu tanh
-            x = x + self._lin(h, b["fc2_w"], b["fc2_b"])
-            if i in self.ds_index:
-                feats.append(self._merge(x, self.ds[self.ds_index.index(i)], post=True))
-            mx.eval(x)
-        out = self._merge(x, self.merger, post=False)
-        mx.eval(out, *feats)
-        return np.array(out), [np.array(f) for f in feats]
 
 
 # -- text encoder positions for an edit (Qwen3-VL get_rope_index) ----------------------------------------------

@@ -21,7 +21,7 @@ Contributions that serve that goal are welcome.
 
 ```sh
 cmake -S . -B build/cmake -G Ninja && cmake --build build/cmake
-python3 -m venv .venv && .venv/bin/pip install -e ".[edit]"
+python3 -m venv .venv && .venv/bin/pip install -e .
 ```
 
 The Metal kernels in `kernels/` are compiled at run time, so editing a

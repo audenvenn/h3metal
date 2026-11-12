@@ -83,23 +83,30 @@ def gptq(w: np.ndarray, H: np.ndarray, bits: int, damp: float = 0.01, block: int
 
 
 class _Hessian:
-    """Accumulates x^T x for one product's inputs on the GPU (MLX)."""
+    """Accumulates x^T x for one product's inputs on the GPU: a half-precision matrix product with float
+    accumulation, X^T times X, added into H by the residual epilogue."""
 
-    def __init__(self, K: int):
-        import mlx.core as mx
-        self.mx = mx
-        self.H = mx.zeros((K, K), dtype=mx.float32)
+    def __init__(self, gpu: Gpu, K: int):
+        if K % 128:
+            raise ValueError(f"input dimension {K} is not a multiple of 128")
+        self.gpu, self.K = gpu, K
+        self.H = gpu.upload(np.zeros((K, K), np.float32))
+        self.ones = gpu.upload(np.ones((3, K), np.float32))
+        self.rt = gpu.upload(np.zeros(K, np.uint8))
         self.n = 0
 
     def add(self, x: np.ndarray):
-        mx = self.mx
-        a = mx.array(x).astype(mx.float32)
-        self.H = self.H + a.T @ a
-        self.n += x.shape[0]
-        mx.eval(self.H)
+        S = x.shape[0]
+        xt = np.zeros((self.K, -(-S // 32) * 32), np.float16)  # X^T, the summed dimension padded with zeros
+        xt[:, :S] = x.T
+        a = self.gpu.upload(xt)
+        ops.gemm(self.gpu, a, QWeight("f16", a, None, self.K, xt.shape[1]), self.H, self.K, epi=1, rtype=self.rt,
+                 gate=self.ones)
+        self.gpu.wait()
+        self.n += S
 
     def get(self) -> np.ndarray:
-        return np.array(self.H).astype(np.float64) / max(self.n, 1)
+        return self.H.numpy().astype(np.float64) / max(self.n, 1)
 
 
 def trajectory(ref: dict, sigmas) -> list[np.ndarray]:
@@ -242,7 +249,7 @@ def calibrate(src: str, base: str, out: str, refs: list[str], fmt="q4", log=prin
         # 1. Inputs of the four products over all states, through the block with float (half) weights.
         hw = {k: QWeight("f16", g.upload(m.astype(np.float16)), None, m.shape[0], m.shape[1])
               for k, m in mats.items()}
-        hs = {"qkv": _Hessian(D), "out": _Hessian(inner), "fc1": _Hessian(D), "fc2": _Hessian(F)}
+        hs = {"qkv": _Hessian(g, D), "out": _Hessian(g, inner), "fc1": _Hessian(g, D), "fc2": _Hessian(g, F)}
         blk = dict(model.blocks[l])
         for st_ in states:
             _block_capture(model, blk | hw, st_, l, hs)

@@ -1,28 +1,20 @@
-"""Edit-only parts against the official modules (see tests/ref/edit_parts.py)."""
-import json
+"""An edit's inputs against the official processor (see tests/ref/edit_parts.py): the vision tower's patches and
+the text encoder's multimodal positions. The vision tower itself: tests/test_vision.py; the VAE encoder:
+tests/test_vae_encoder.py."""
 import os
 import sys
-import time
+
 import numpy as np
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from h3metal import edit
-from h3metal.st import SafeTensors
+from h3metal import edit  # noqa: E402
 
-W = os.environ["H3METAL_WEIGHTS"]  # the official MiniMax-H3-Image directory
 r = np.load(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("H3METAL_REF", "ref") + "/edit_ref.npz")
-def rel(a, b): return np.linalg.norm(a - b) / np.linalg.norm(b)
-
 p, grid = edit.vision_patches(r["vis_img"])
-print("patches:", p.shape, "max abs err", np.abs(p - r["pixel_values"]).max(), "grid", grid, r["grid"])
-st = SafeTensors(os.path.join(W, "text_encoder", "model-00014-of-00014.safetensors"))
-vw = {k[len("model.visual."):]: st.get(k) for k in st.keys() if k.startswith("model.visual.")}
-cfg = json.load(open(os.path.join(W, "text_encoder", "config.json")))["vision_config"]
-t = time.time()
-vt = edit.VisionTower(vw, cfg)
-emb, ds = vt(p, grid)
-print(f"vision tower {time.time() - t:.2f}s: embeds rel err {rel(emb, r['vis_embeds']):.4f}",
-      " deepstack", [f"{rel(d, r[f'deepstack{i}']):.4f}" for i, d in enumerate(ds)])
+err = np.abs(p - r["pixel_values"]).max()
+print("patches:", p.shape, "max abs err", err, "grid", grid, r["grid"])
+assert err < 1e-5 and tuple(grid) == tuple(r["grid"][0])
 tags = (r["ids"] == 151655).astype(np.int32)
 pos = edit.edit_positions(tags, [tuple(g) for g in r["grid"]])
 print("positions equal:", np.array_equal(pos, r["pos3"]))
-# The VAE encoder runs on the GPU from the converted file: tests/test_vae_encoder.py.
+assert np.array_equal(pos, r["pos3"])

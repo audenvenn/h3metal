@@ -26,10 +26,6 @@ classifiers = [
 ]
 dependencies = ["numpy", "tokenizers", "pillow"]
 
-[project.optional-dependencies]
-# Image editing runs the vision tower on MLX.
-edit = ["mlx>=0.30"]
-
 [project.urls]
 Homepage = "https://github.com/audenvenn/h3metal"
 Issues = "https://github.com/audenvenn/h3metal/issues"
