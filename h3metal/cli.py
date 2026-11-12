@@ -7,7 +7,7 @@ import os
 import sys
 import time
 
-DEFAULT_MODEL = os.environ.get("H3METAL_MODEL", os.path.expanduser("~/.h3metal/minimax-h3-image"))
+DEFAULT_MODEL = os.environ.get("H3METAL_MODEL", os.path.expanduser("~/.h3metal/model"))
 
 
 def _size(s: str):
@@ -111,7 +111,7 @@ def main(argv=None):
     c.add_argument("--only", help="comma-separated subset of vae,vision,te,dit,tokenizer")
     c.set_defaults(func=cmd_convert)
     d = sub.add_parser("download", help="fetch the official weights h3metal converts from (about 125 GB)")
-    d.add_argument("dest", nargs="?", default=os.path.expanduser("~/.h3metal/MiniMax-H3-Image"))
+    d.add_argument("dest", nargs="?", default=os.path.expanduser("~/.h3metal/checkpoint"))
     d.add_argument("--source", choices=["huggingface", "modelscope"], default="huggingface")
     d.add_argument("-j", "--jobs", type=int, default=4)
     d.set_defaults(func=cmd_download)
