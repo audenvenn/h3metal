@@ -57,15 +57,18 @@ if __name__ == "__main__":
 
 
 
-def check_q8(Lq, L, H, KVH, D, causal=False, wm=8, seed=0, **variant):
+def check_q8(Lq, L, H, KVH, D, causal=False, wm=8, seed=0, temp=1.0, ramp=0.0, **variant):
     """Integer score product: per-row int8 queries and keys, against the float reference of the dequantized
-    inputs."""
+    inputs. temp sharpens the softmax; ramp makes the keys grow along the sequence, so that the running maximum
+    keeps moving."""
     rng = np.random.default_rng(seed)
     gpu = Gpu()
     q_rows = (Lq + 255) // 256 * 256
     k_rows = (L + 31) // 32 * 32
-    q = rng.standard_normal((H, Lq, D)).astype(np.float32)
+    q = rng.standard_normal((H, Lq, D)).astype(np.float32) * temp
     k = rng.standard_normal((KVH, L, D)).astype(np.float32)
+    if ramp:
+        k *= (1 + ramp * np.arange(L) / L)[None, :, None].astype(np.float32)
     v = rng.standard_normal((KVH, L, D)).astype(np.float16)
 
     def q8(x):
@@ -85,7 +88,8 @@ def check_q8(Lq, L, H, KVH, D, causal=False, wm=8, seed=0, **variant):
     got = O.numpy()[:Lq].astype(np.float64)
     ref = ref_attn(qi * qs[..., None], ki * ks[..., None], v, D ** -0.5, causal)
     err = np.abs(got - ref).max()
-    print(f"q8 Lq={Lq} L={L} H={H} KVH={KVH} D={D} causal={causal}: max abs err {err:.2e}")
+    print(f"q8 Lq={Lq} L={L} H={H} KVH={KVH} D={D} causal={causal} temp={temp} ramp={ramp} wm={wm} {variant}: "
+          f"max abs err {err:.2e}")
     assert err < 5e-3
 
 
@@ -99,3 +103,12 @@ if __name__ == "__main__":
         check_q8(300, 1037, 3, 3, 128, wm=wm, DB=1, PVORDER=1)
         check_q8(64, 64, 4, 4, 64, wm=wm, DB=1)
     print("ok q8 double-buffered")
+    for wm in (10, 16):  # the leaner softmax (the transformer's configuration: wm 10)
+        cfg = dict(wm=wm, DB=1, PVORDER=1, VX=1)
+        check_q8(300, 1037, 3, 3, 128, **cfg)
+        check_q8(64, 64, 4, 4, 64, **cfg)
+        check_q8(130, 130, 8, 2, 128, causal=True, **cfg)
+        check_q8(300, 1037, 3, 3, 128, temp=6.0, **cfg)
+        check_q8(257, 4100, 2, 2, 128, temp=8.0, ramp=4.0, **cfg)
+        check_q8(200, 200, 2, 2, 128, causal=True, temp=5.0, ramp=3.0, **cfg)
+    print("ok q8 leaner softmax")

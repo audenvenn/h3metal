@@ -84,6 +84,12 @@ class Layout:
 
 
 class DiT:
+    # Attention with int8 scores: keys and values double-buffered in threadgroup memory, P V with the output
+    # dimensions in the outer loop, the leaner softmax (kernels/attention.metal: DB, PVORDER, VX), and ten
+    # SIMD-groups per threadgroup, which the leaner softmax's lower register count allows (on the M6 5-10% faster
+    # than sixteen from 1,324 to 16,684 tokens).
+    attn_cfg_q8 = dict(wm=10, bk=32, DB=1, PVORDER=1, VX=1)
+
     def __init__(self, gpu: Gpu, wf: WeightFile):
         self.gpu, self.wf = gpu, wf
         c = wf.meta["config"]
@@ -188,10 +194,8 @@ class DiT:
         sc = dict(q_scale=b["qs"], k_scale=b["ks"]) if q8 else {}
         ops.qk_norm_rope(g, qkv, blk["q_norm"], blk["k_norm"], b["cos"], b["sin"], Qb, Kb, b["V"], M=S,
                          Hq=H, Hk=H, Hv=H, hd=hd, out_rows=Sp, rot=rot, eps=self.cfg["qk_eps"], **sc)
-        # Int8 scores: keys and values double-buffered in threadgroup memory, P V with the output dimensions in
-        # the outer loop (kernels/attention.metal: DB, PVORDER).
         ops.attention(g, Qb, Kb, b["V"], b["o"], Lq=S, L=S, H=H, KVH=H, D=hd, q_rows=Sp, k_rows=Sp,
-                      scale=hd ** -0.5, **self.attn_cfg, **({"DB": 1, "PVORDER": 1} if q8 else {}), **sc)
+                      scale=hd ** -0.5, **(self.attn_cfg_q8 if q8 else self.attn_cfg), **sc)
         ops.rot_q8(g, b["o"], a8.view((Sp, inner)), sa, S, inner)
         ops.gemm(g, a8.view((Sp, inner)), blk["out"], x, S, sa=sa, epi=1, rtype=rt, gate=g1, g_stride=g_stride,
                  **_tile(blk["out"], S))

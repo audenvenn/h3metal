@@ -14,7 +14,8 @@
 // (h / seq_heads) * seq_rows + i, columns (h % seq_heads) * HD: a batch of
 // short sequences (the VAE's tiles) runs as one dispatch.
 //
-// Specialization: HD (head dim, a multiple of 32), WM, BK (a multiple of 32), CAUSAL, O_T, KPAD.
+// Specialization: HD (head dim, a multiple of 32), WM, BK (a multiple of 32), CAUSAL, O_T, KPAD; with int8
+// scores (QK8) also DB, PVORDER, VX and SLACK (below).
 
 #include <metal_stdlib>
 #include "nax.h"
@@ -45,6 +46,15 @@ using namespace metal;
 #endif
 #ifndef PVORDER
 #define PVORDER 0  // 1: P V with the output dimensions in the outer loop
+#endif
+#ifndef VX
+#define VX 0  // QK8 only: less vector work per score and fewer registers (see the softmax below)
+#endif
+#ifndef SLACK
+#define SLACK 8.0f  // VX: the running maximum is updated only when a score exceeds it by this much (log2 units)
+#endif
+#if VX && !QK8
+#error "VX needs QK8"
 #endif
 #if DB && !QK8
 #error "DB needs QK8 (two buffers of half keys do not fit in threadgroup memory)"
@@ -87,8 +97,13 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
   for (short d = 0; d < DF; d++) nax::load_rows(qf[d], Qh + d * 16, HD, sc, active ? p.Lq - q0 : 0);
 #if QK8
   const int lim = active ? p.Lq - q0 : 0;
+#if VX
+  const float qsc0 = sc.y < lim ? max(qs[size_t(h) * p.q_rows + q0 + sc.y] * p.scale, FLT_MIN) : 1.0f;
+  const float qsc1 = sc.y + 8 < lim ? max(qs[size_t(h) * p.q_rows + q0 + sc.y + 8] * p.scale, FLT_MIN) : 1.0f;
+#else
   const float qsc0 = sc.y < lim ? qs[size_t(h) * p.q_rows + q0 + sc.y] * p.scale : 0.0f;
   const float qsc1 = sc.y + 8 < lim ? qs[size_t(h) * p.q_rows + q0 + sc.y + 8] * p.scale : 0.0f;
+#endif
   const device float *ksh = ksc + size_t(kvh) * p.k_rows;
 #endif
 
@@ -193,8 +208,13 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
 #pragma clang loop unroll(full)
       for (short j = 0; j < KF; j++) {
         const float4 kq = *(const threadgroup float4 *)(kscale + j * 16 + sc.x);
+#if VX  // the query's scale is applied in the exponent: max_j(qs * t_j) = qs * max_j(t_j)
+#pragma clang loop unroll(full)
+        for (short e = 0; e < 8; e++) s[j][e] = float(si[j][e]) * kq[e & 3];
+#else
 #pragma clang loop unroll(full)
         for (short e = 0; e < 8; e++) s[j][e] = float(si[j][e]) * ((e < 4 ? qsc0 : qsc1) * kq[e & 3]);
+#endif
       }
     }
 #else
@@ -232,6 +252,51 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
         s[j][e] = v;
       }
     }
+#if VX
+    // Less vector work per score: the row maximum is first taken within each lane and compared with the running
+    // maximum; only when some score exceeds it by more than SLACK do the four lanes of a row exchange their
+    // maxima and the output get rescaled (probabilities up to 2^SLACK are fine in half precision). The
+    // exponent is one fused multiply-add, and each lane keeps its own partial row sums until the end.
+    {
+      float a = -INFINITY, b = -INFINITY;
+#pragma clang loop unroll(full)
+      for (short j = 0; j < KF; j++) {
+        a = max(a, max(max(s[j][0], s[j][1]), max(s[j][2], s[j][3])));
+        b = max(b, max(max(s[j][4], s[j][5]), max(s[j][6], s[j][7])));
+      }
+      a *= qsc0;
+      b *= qsc1;
+      if (simd_any(a > m0 + SLACK || b > m1 + SLACK)) {
+        a = max(a, simd_shuffle_xor(a, ushort(1)));
+        a = max(a, simd_shuffle_xor(a, ushort(8)));
+        b = max(b, simd_shuffle_xor(b, ushort(1)));
+        b = max(b, simd_shuffle_xor(b, ushort(8)));
+        const float n0 = max(m0, a), n1 = max(m1, b);
+        const float f0 = fast::exp2(m0 - n0), f1 = fast::exp2(m1 - n1);
+        m0 = n0;
+        m1 = n1;
+        l0 *= f0;
+        l1 *= f1;
+#pragma clang loop unroll(full)
+        for (short d = 0; d < DF; d++) {
+#pragma clang loop unroll(full)
+          for (short e = 0; e < 4; e++) o[d][e] *= f0;
+#pragma clang loop unroll(full)
+          for (short e = 4; e < 8; e++) o[d][e] *= f1;
+        }
+      }
+      const float nm0 = -m0, nm1 = -m1;
+#pragma clang loop unroll(full)
+      for (short j = 0; j < KF; j++) {
+#pragma clang loop unroll(full)
+        for (short e = 0; e < 4; e++) s[j][e] = fast::exp2(fma(s[j][e], qsc0, nm0));
+#pragma clang loop unroll(full)
+        for (short e = 4; e < 8; e++) s[j][e] = fast::exp2(fma(s[j][e], qsc1, nm1));
+        l0 += (s[j][0] + s[j][1]) + (s[j][2] + s[j][3]);
+        l1 += (s[j][4] + s[j][5]) + (s[j][6] + s[j][7]);
+      }
+    }
+#else
     float n0 = m0, n1 = m1;
 #pragma clang loop unroll(full)
     for (short j = 0; j < KF; j++) nax::row_max(s[j], n0, n1);
@@ -260,6 +325,7 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
       for (short e = 4; e < 8; e++) o[d][e] *= f1;
     }
     }
+#endif
 #if PVORDER
     nax::frag<half> ph[KF];
 #pragma clang loop unroll(full)
@@ -308,6 +374,12 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
 #endif
   }
   if (!active) return;
+#if VX
+  l0 += simd_shuffle_xor(l0, ushort(1));
+  l0 += simd_shuffle_xor(l0, ushort(8));
+  l1 += simd_shuffle_xor(l1, ushort(1));
+  l1 += simd_shuffle_xor(l1, ushort(8));
+#endif
   const float r0 = 1.0f / l0, r1 = 1.0f / l1;
   const int seq = h / p.seq_heads;
   device O_T *out = O + (size_t(seq) * p.seq_rows + q0) * p.o_stride + (h - seq * p.seq_heads) * HD;
