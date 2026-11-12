@@ -43,6 +43,9 @@ using namespace metal;
 #ifndef DB
 #define DB 0  // QK8 only: double-buffered keys and values, the next block's loads in flight during this block
 #endif
+#ifndef PVORDER
+#define PVORDER 0  // 1: P V with the output dimensions in the outer loop
+#endif
 #if DB && !QK8
 #error "DB needs QK8 (two buffers of half keys do not fit in threadgroup memory)"
 #endif
@@ -257,6 +260,21 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
       for (short e = 4; e < 8; e++) o[d][e] *= f1;
     }
     }
+#if PVORDER
+    nax::frag<half> ph[KF];
+#pragma clang loop unroll(full)
+    for (short j = 0; j < KF; j++) ph[j] = nax::frag<half>(s[j]);
+#pragma clang loop unroll(full)
+    for (short d = 0; d < DF; d += 2) {
+#pragma clang loop unroll(full)
+      for (short j = 0; j < KF; j++) {
+        nax::frag<half> v0, v1;
+        nax::load_tg(v0, vs + (j * 16) * LDK + d * 16, LDK, sc);
+        nax::load_tg(v1, vs + (j * 16) * LDK + d * 16 + 16, LDK, sc);
+        nax::mma<float, half, half, false, false>(o[d], o[d + 1], ph[j], v0, v1);
+      }
+    }
+#else
 #pragma clang loop unroll(full)
     for (short j = 0; j < KF; j++) {
       nax::frag<half> ph = nax::frag<half>(s[j]);
@@ -268,6 +286,7 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
         nax::mma<float, half, half, false, false>(o[d], o[d + 1], ph, v0, v1);
       }
     }
+#endif
     }  // compute
 #if DB
     if (more) {  // the next block into the other buffer

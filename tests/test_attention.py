@@ -96,6 +96,6 @@ if __name__ == "__main__":
     check_q8(64, 64, 4, 4, 64)
     print("ok q8")
     for wm in (8, 16):  # double-buffered keys and values (the transformer's configuration)
-        check_q8(300, 1037, 3, 3, 128, wm=wm, DB=1)
+        check_q8(300, 1037, 3, 3, 128, wm=wm, DB=1, PVORDER=1)
         check_q8(64, 64, 4, 4, 64, wm=wm, DB=1)
     print("ok q8 double-buffered")
