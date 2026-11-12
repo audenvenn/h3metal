@@ -66,6 +66,13 @@ def cmd_convert(a):
         convert_dit(src, os.path.join(a.out, "dit.h3m"), fmts=fmts)
 
 
+def cmd_download(a):
+    from .download import download
+    if not download(a.dest, a.source, a.jobs):
+        sys.exit("some files did not download; run the command again to resume")
+    print(f"next: h3metal convert {a.dest}")
+
+
 def cmd_info(a):
     from .gpu import Gpu
     g = Gpu()
@@ -103,6 +110,11 @@ def main(argv=None):
     c.add_argument("--vae", default="f16")
     c.add_argument("--only", help="comma-separated subset of vae,vision,te,dit,tokenizer")
     c.set_defaults(func=cmd_convert)
+    d = sub.add_parser("download", help="fetch the official weights h3metal converts from (about 125 GB)")
+    d.add_argument("dest", nargs="?", default=os.path.expanduser("~/.h3metal/MiniMax-H3-Image"))
+    d.add_argument("--source", choices=["huggingface", "modelscope"], default="huggingface")
+    d.add_argument("-j", "--jobs", type=int, default=4)
+    d.set_defaults(func=cmd_download)
     i = sub.add_parser("info", help="device and model files")
     i.add_argument("--model", default=DEFAULT_MODEL)
     i.set_defaults(func=cmd_info)

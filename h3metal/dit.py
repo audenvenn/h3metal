@@ -146,6 +146,11 @@ class DiT:
     def free(self):
         self._bufs = None
 
+    def _prefetch(self, l: int):
+        """Asks the kernel to read block l's weights ahead (a no-op when they are already in memory)."""
+        if 0 <= l < self.L:
+            self.wf.prefetch([f"blocks.{l}.{k}" for k in ("qkv", "out", "fc1", "fc2")])
+
     # -- pieces ----------------------------------------------------------------------------------------------------
     def _block(self, b, blk, S: int, x: Tensor, mod1: Tensor, mod2: Tensor, g1: Tensor, g2: Tensor, rt: Tensor,
                rot: int, mod_stride: int, g_stride: int):
@@ -219,7 +224,9 @@ class DiT:
         ops.linear_f32(g, b["lat"], self.x_embed_w, self.x_embed_b, x.row(T, n_img), M=n_img, N=D,
                        K=self.patch_dim)
         L3 = 3 * 2 * D  # elements per (step, layer) in the modulation tables
+        self._prefetch(0)
         for l, blk in enumerate(self.blocks):
+            self._prefetch(l + 1)
             o = (s * self.L + l)
             mod1 = self.mod_attn.view((3, 2, D), offset_elems=o * L3)
             mod2 = self.mod_mlp.view((3, 2, D), offset_elems=o * L3)
