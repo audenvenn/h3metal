@@ -36,6 +36,7 @@ kernel needs no rebuild; editing `src/` does.
 | Transformer and text encoder against the official modules, random weights | GPU; a torch + diffusers + transformers environment for the reference side | `tests/ref/mini_dit.py`, `tests/ref/mini_te.py`, then `tests/test_dit_mini.py`, `tests/test_te_mini.py` |
 | VAE and the edit-only parts against the official modules, real weights | GPU, the official checkpoint, the reference environment | `tests/ref/vae_decode.py`, `tests/ref/edit_parts.py`, then `tests/test_vae.py`, `tests/test_vae_encoder.py`, `tests/test_edit_parts.py` |
 | A converted text encoder against reference embeddings, without the GPU | the converted file, reference embeddings (`tests/ref/reference.py --te-only`) | `tests/check_te_cpu.py`; on the GPU, `bench/te_quality.py` |
+| An edit's text-encoder output (vision tower, DeepStack, positions) against the official modules | GPU, a converted model, `tests/ref/reference.py --te-only --image` | `tests/test_edit_te.py` |
 | Image quality against the official pipeline | GPU, checkpoint, reference environment | `tests/ref/reference.py`, then `bench/quality.py` |
 | Speed | idle GPU, converted model | `bench/dit_layer_bench.py`, `bench/gemm_bench.py`, `bench/attn_bench.py` |
 
