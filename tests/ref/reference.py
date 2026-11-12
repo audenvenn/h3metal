@@ -185,6 +185,9 @@ def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
     torch.set_default_dtype(default)
     for m in (model.proj_in, model.time_embedder, model.pdd_proj_out):
         m.float()
+    for b in model.buffers():  # buffers (the rotary frequencies) stay float32, as before
+        if b.is_floating_point():
+            b.data = b.data.float()
     # Glue weights (everything but the 50 blocks), from the original keys.
     glue = {}
     for k in list(sh.wm.keys()):
