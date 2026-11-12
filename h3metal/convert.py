@@ -58,10 +58,12 @@ def _signs(seed: int, layer: int, role: int, n: int) -> np.ndarray:
     return random_signs(n, seed * 1_000_003 + layer * 101 + role)
 
 
-def convert_dit(src: str, out: str, *, fmts=None, refiner_fmt: str = "q8", seed: int = 1, layers: int | None = None,
+def convert_dit(src: str, out, *, fmts=None, refiner_fmt: str = "q8", seed: int = 1, layers: int | None = None,
                 log=print):
-    """src: the MiniMax-H3-Image directory (transformer/, pdd_*). fmts: format per matrix kind."""
-    fmts = {"qkv": "q8", "out": "q8", "fc1": "q8", "fc2": "q8", **(fmts or {})}
+    """src: the MiniMax-H3-Image directory (transformer/, pdd_*). fmts: format per matrix kind.
+    out may also be a dict {path: fmts} to write several formats in one pass over the checkpoint."""
+    outs = out if isinstance(out, dict) else {out: fmts}
+    outs = {p: {"qkv": "q8", "out": "q8", "fc1": "q8", "fc2": "q8", **(f or {})} for p, f in outs.items()}
     with open(os.path.join(src, "transformer", "config.json")) as f:
         cfg = json.load(f)
     with open(os.path.join(src, "pdd_config.json")) as f:
@@ -92,9 +94,21 @@ def convert_dit(src: str, out: str, *, fmts=None, refiner_fmt: str = "q8", seed:
                    "rope_theta": 10000.0, "norm_eps": cfg["norm_eps"], "qk_eps": cfg["qk_norm_eps"],
                    "final_eps": cfg["final_norm_eps"]},
         "timesteps": t_steps.tolist(), "sigmas": sigmas.tolist(), "ref_t": REF_T,
-        "fmts": fmts, "refiner_fmt": refiner_fmt, "seed": seed,
+        "refiner_fmt": refiner_fmt, "seed": seed,
     }
-    w = Writer(out, meta)
+    writers = [(Writer(p, dict(meta, fmts=f)), f) for p, f in outs.items()]
+
+    class _All:
+        """Writes every tensor to all the outputs."""
+        def tensor(self, *a, **k):
+            for wr, _ in writers:
+                wr.tensor(*a, **k)
+
+        def linear(self, *a, **k):
+            for wr, _ in writers:
+                wr.linear(*a, **k)
+
+    w = _All()
     t_start = time.time()
 
     # Patch embedding, text projection, per-step heads.
@@ -118,24 +132,33 @@ def convert_dit(src: str, out: str, *, fmts=None, refiner_fmt: str = "q8", seed:
             final[s, ty, 1] = shift[ti]
     w.tensor("final_mod", final, "f32")
 
-    def block(prefix: str, name: str, layer: int, fmt_of, tables=None):
+    def put(name: str, kind: str, mat: np.ndarray, refiner: bool):
+        cache = {}
+        for wr, f in writers:
+            fmt = refiner_fmt if refiner else f[kind]
+            if fmt not in cache:
+                cache[fmt] = quantize(fmt, mat)
+            codes, scales = cache[fmt]
+            wr.linear(name, fmt, mat.shape[0], mat.shape[1], codes, scales)
+
+    def block(prefix: str, name: str, layer: int, refiner: bool):
         """One transformer block's matrices; returns the input sign vectors folded into the norms."""
         s_in, s_o = _signs(seed, layer, 1, D), _signs(seed, layer, 2, inner)
         s_mlp, s_f = _signs(seed, layer, 3, D), _signs(seed, layer, 4, F)
         qkv = st.get(f"{prefix}.attn.qkv_proj.weight")  # per-head interleaved [h: q k v]
         qkv = qkv.reshape(H, 3, hd, D).transpose(1, 0, 2, 3).reshape(3 * inner, D)
         qkv[2 * inner:] *= s_o[:, None]
-        _lin(w, f"{name}.qkv", fmt_of("qkv"), rotate_in(qkv, s_in))
+        put(f"{name}.qkv", "qkv", rotate_in(qkv, s_in), refiner)
         del qkv
         o = st.get(f"{prefix}.attn.out_proj.weight")
-        _lin(w, f"{name}.out", fmt_of("out"), rotate_in(o, s_o))
+        put(f"{name}.out", "out", rotate_in(o, s_o), refiner)
         del o
         fc1 = st.get(f"{prefix}.mlp.fc1.weight")  # [gate; value]
         fc1 = np.concatenate([fc1[F:] * s_f[:, None], fc1[:F]])  # -> [value * sign; gate]
-        _lin(w, f"{name}.fc1", fmt_of("fc1"), rotate_in(fc1, s_mlp))
+        put(f"{name}.fc1", "fc1", rotate_in(fc1, s_mlp), refiner)
         del fc1
         fc2 = st.get(f"{prefix}.mlp.fc2.weight")
-        _lin(w, f"{name}.fc2", fmt_of("fc2"), rotate_in(fc2, s_f))
+        put(f"{name}.fc2", "fc2", rotate_in(fc2, s_f), refiner)
         del fc2
         w.tensor(f"{name}.q_norm", st.get(f"{prefix}.attn.q_norm.weight").astype(np.float32), "f32")
         w.tensor(f"{name}.k_norm", st.get(f"{prefix}.attn.k_norm.weight").astype(np.float32), "f32")
@@ -144,7 +167,7 @@ def convert_dit(src: str, out: str, *, fmts=None, refiner_fmt: str = "q8", seed:
     # Token refiner: plain pre-norm blocks over the text rows (no modulation, no rotary embedding).
     for i in range(cfg["token_refiner_num_layers"]):
         prefix = f"token_refiner.blocks.{i}"
-        s_in, s_mlp = block(prefix, f"refiner.{i}", 1000 + i, lambda kind: refiner_fmt)
+        s_in, s_mlp = block(prefix, f"refiner.{i}", 1000 + i, True)
         m1 = np.stack([st.get(f"{prefix}.norm1.weight") * s_in, np.zeros(D, np.float32)])[None]
         m2 = np.stack([st.get(f"{prefix}.norm2.weight") * s_mlp, np.zeros(D, np.float32)])[None]
         w.tensor(f"refiner.{i}.mod1", m1.astype(np.float32), "f32")
@@ -159,7 +182,7 @@ def convert_dit(src: str, out: str, *, fmts=None, refiner_fmt: str = "q8", seed:
     gate_mlp = np.zeros((n_steps, n_layers, 3, D), np.float32)
     for l in range(n_layers):
         prefix = f"blocks.{l}"
-        s_in, s_mlp = block(prefix, f"blocks.{l}", l, lambda kind: fmts[kind])
+        s_in, s_mlp = block(prefix, f"blocks.{l}", l, False)
         aw = st.get(f"{prefix}.adaln_proj.linear.weight")
         ab = st.get(f"{prefix}.adaln_proj.linear.bias")
         mod = bf16_round(act @ aw.T + ab).reshape(len(ts), 3, 6, D)  # [t][modality][6][D]
@@ -179,8 +202,10 @@ def convert_dit(src: str, out: str, *, fmts=None, refiner_fmt: str = "q8", seed:
     w.tensor("mod_mlp", mod_mlp, "f32")
     w.tensor("gate_attn", gate_attn, "f32")
     w.tensor("gate_mlp", gate_mlp, "f32")
-    w.close()
-    log(f"wrote {out} ({os.path.getsize(out) / 1e9:.2f} GB) in {time.time() - t_start:.0f} s")
+    for wr, _ in writers:
+        wr.close()
+    for p in outs:
+        log(f"wrote {p} ({os.path.getsize(p) / 1e9:.2f} GB) in {time.time() - t_start:.0f} s")
 
 
 def _lin(w: Writer, name: str, fmt: str, mat: np.ndarray, bias=None, G: int = 128):
