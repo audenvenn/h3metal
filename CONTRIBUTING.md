@@ -34,7 +34,8 @@ kernel needs no rebuild; editing `src/` does.
 | Conversion numerics, file format, layouts | nothing | `python tests/test_convert.py` |
 | Matrix products, attention, row kernels against NumPy | GPU | `python tests/test_gemm.py`, `tests/test_attention.py`, `tests/test_ops.py` |
 | Transformer and text encoder against the official modules, random weights | GPU; a torch + diffusers + transformers environment for the reference side | `tests/ref/mini_dit.py`, `tests/ref/mini_te.py`, then `tests/test_dit_mini.py`, `tests/test_te_mini.py` |
-| VAE and the edit-only parts against the official modules, real weights | GPU, the official checkpoint, the reference environment | `tests/ref/vae_decode.py`, `tests/ref/edit_parts.py`, then `tests/test_vae.py`, `tests/test_edit_parts.py` |
+| VAE and the edit-only parts against the official modules, real weights | GPU, the official checkpoint, the reference environment | `tests/ref/vae_decode.py`, `tests/ref/edit_parts.py`, then `tests/test_vae.py`, `tests/test_vae_encoder.py`, `tests/test_edit_parts.py` |
+| A converted text encoder against reference embeddings, without the GPU | the converted file, reference embeddings (`tests/ref/reference.py --te-only`) | `tests/check_te_cpu.py`; on the GPU, `bench/te_quality.py` |
 | Image quality against the official pipeline | GPU, checkpoint, reference environment | `tests/ref/reference.py`, then `bench/quality.py` |
 | Speed | idle GPU, converted model | `bench/dit_layer_bench.py`, `bench/gemm_bench.py`, `bench/attn_bench.py` |
 
@@ -43,8 +44,8 @@ The reference scripts import diffusers' weight conversion script; point
 `H3METAL_WEIGHTS` names the official checkpoint and `H3METAL_REF` a working
 directory for reference outputs.
 
-CI runs the first row, byte-compiles the Python sources and checks the
-English-only rule. It cannot run the GPU tests, so say in the pull request
+CI runs the first row, byte-compiles the Python sources, lints them with
+`ruff check .` and checks the English-only rule. It cannot run the GPU tests, so say in the pull request
 which of them you ran and on what machine.
 
 ## Workflow
