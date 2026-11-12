@@ -223,6 +223,9 @@ def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
                 block.load_state_dict(sd)
                 block.to(dev, dtype)
                 x = block(x, temb, adaln_idx, rotary)
+                if dev.type == "mps":  # PyTorch keeps freed MPS memory cached; at 2048 x 2048 that grows into swap
+                    torch.mps.synchronize()
+                    torch.mps.empty_cache()
             head = model.pdd_proj_out[s]
             y = model.norm_out(x, temb, tidx.to(dev)).float()
             v = head(y).index_select(1, img_idx.to(dev))[0].float().cpu()
