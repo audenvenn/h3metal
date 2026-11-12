@@ -177,7 +177,14 @@ def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
     ccfg = dict(cfgj)
     H, HD = cfgj["num_attention_heads"], cfgj["attention_head_dim"]
     small = dict(cfgj, num_layers=0)
+    # Built in the compute dtype, except the parts the checkpoint keeps in float32: built in float32 and moved,
+    # the non-block weights (the token refiner holds two full blocks) peaked near 15 GB on a 24 GB Mac.
+    default = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
     model = tm.MiniMaxH3ImageTransformer2DModel(**small).eval()
+    torch.set_default_dtype(default)
+    for m in (model.proj_in, model.time_embedder, model.pdd_proj_out):
+        m.float()
     # Glue weights (everything but the 50 blocks), from the original keys.
     glue = {}
     for k in list(sh.wm.keys()):
@@ -190,10 +197,7 @@ def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
     missing, unexpected = model.load_state_dict(glue, strict=False)
     assert not [m for m in missing if not m.startswith("transformer_blocks")], missing
     del glue
-    model.to(dev)
-    for n, p in model.named_parameters():  # keep the checkpoint's mixed precision
-        if not n.startswith(("proj_in", "time_embedder", "pdd_proj_out")):
-            p.data = p.data.to(dtype)
+    model.to(dev)  # already in the checkpoint's mixed precision
     tm.dispatch_attention_fn = _chunked_attention
     # The block takes every weight from the checkpoint each time, so it is built in the compute dtype directly
     # (built in float32 first, it would hold 2.6 GB on the CPU for nothing).
