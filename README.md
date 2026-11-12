@@ -17,9 +17,10 @@ at TBD dB PSNR against the official pipeline. Details in
 
 ## Quick start
 
-Needs a Mac with Apple silicon and Metal 4 (macOS 26 or later), Python 3.10+,
-CMake and the Xcode command line tools. The matrix units h3metal is built
-for are in M5- and M6-class GPUs; it is developed and measured on an M6.
+Needs a Mac with Apple silicon and Metal 4 (macOS 26 or later), Python 3.10+
+and the Xcode command line tools (pip fetches CMake and Ninja to build the
+GPU runtime). The matrix units h3metal is built for are in M5- and M6-class
+GPUs; it is developed and measured on an M6.
 
 ```sh
 pip install "h3metal[edit] @ git+https://github.com/audenvenn/h3metal"
