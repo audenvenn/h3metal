@@ -40,6 +40,12 @@ using namespace metal;
 #ifndef QK8
 #define QK8 0
 #endif
+#ifndef DB
+#define DB 0  // QK8 only: double-buffered keys and values, the next block's loads in flight during this block
+#endif
+#if DB && !QK8
+#error "DB needs QK8 (two buffers of half keys do not fit in threadgroup memory)"
+#endif
 #if QK8
 #define QK_T int8_t
 #define LDQK (HD + 16)
@@ -59,10 +65,10 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
                          ushort sg [[simdgroup_index_in_threadgroup]],
                          ushort tid [[thread_index_in_threadgroup]])
 {
-  threadgroup QK_T ks[BK * LDQK];
-  threadgroup half vs[BK * LDK];
+  threadgroup QK_T ks_[DB + 1][BK * LDQK];
+  threadgroup half vs_[DB + 1][BK * LDK];
 #if QK8
-  threadgroup float kscale[BK];
+  threadgroup float kscale_[DB + 1][BK];
 #endif
   const int h = int(tg.y);
   const int kvh = h / (p.H / p.KVH);
@@ -95,7 +101,54 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
   constexpr int NT = WM * 32;              // threads
   constexpr int CHUNKS = BK * HD / 8;      // 16-byte chunks per block
 
+#if DB
+  constexpr int PER = (CHUNKS + NT - 1) / NT;
+#pragma clang loop unroll(full)
+  for (int i = 0; i < PER; i++) {  // block 0 into buffer 0
+    const int c = tid + i * NT;
+    if (c < CHUNKS) {
+      const int r = c / (HD / 8), col = (c % (HD / 8)) * 8;
+      *(threadgroup packed_char4 *)(ks_[0] + r * LDQK + col) = *(const device packed_char4 *)(K + size_t(r) * HD + col);
+      *(threadgroup packed_char4 *)(ks_[0] + r * LDQK + col + 4) = *(const device packed_char4 *)(K + size_t(r) * HD + col + 4);
+      *(threadgroup half4 *)(vs_[0] + r * LDK + col) = *(const device half4 *)(V + size_t(r) * HD + col);
+      *(threadgroup half4 *)(vs_[0] + r * LDK + col + 4) = *(const device half4 *)(V + size_t(r) * HD + col + 4);
+    }
+  }
+  if (tid < BK) kscale_[0][tid] = ksh[tid];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  int cur = 0;
+#endif
   for (int kb = 0; kb < kend; kb += BK) {
+#if DB
+    const bool more = kb + BK < kend;
+    packed_char4 rk0[PER], rk1[PER];
+    half4 rv0[PER], rv1[PER];
+    float rks = 0.0f;
+    if (more) {
+#pragma clang loop unroll(full)
+      for (int i = 0; i < PER; i++) {
+        const int c = tid + i * NT;
+        if (c < CHUNKS) {
+          const int r = c / (HD / 8), col = (c % (HD / 8)) * 8;
+          const size_t at = size_t(kb + BK + r) * HD + col;
+          rk0[i] = *(const device packed_char4 *)(K + at);
+          rk1[i] = *(const device packed_char4 *)(K + at + 4);
+          rv0[i] = *(const device half4 *)(V + at);
+          rv1[i] = *(const device half4 *)(V + at + 4);
+        }
+      }
+      if (tid < BK) rks = ksh[kb + BK + tid];
+    }
+    const threadgroup QK_T *ks = ks_[cur];
+    const threadgroup half *vs = vs_[cur];
+    const threadgroup float *kscale = kscale_[cur];
+    if (active) {
+#else
+    threadgroup QK_T *ks = ks_[0];
+    threadgroup half *vs = vs_[0];
+#if QK8
+    threadgroup float *kscale = kscale_[0];
+#endif
     threadgroup_barrier(mem_flags::mem_threadgroup);
 #pragma clang loop unroll(full)
     for (int c = tid; c < CHUNKS; c += NT) {
@@ -115,6 +168,8 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
 #endif
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (!active) continue;
+    {
+#endif
 
     nax::frag<float> s[KF];
 #if QK8
@@ -213,6 +268,25 @@ kernel void attention(device const QK_T *Q [[buffer(0)]],
         nax::mma<float, half, half, false, false>(o[d], o[d + 1], ph, v0, v1);
       }
     }
+    }  // compute
+#if DB
+    if (more) {  // the next block into the other buffer
+#pragma clang loop unroll(full)
+      for (int i = 0; i < PER; i++) {
+        const int c = tid + i * NT;
+        if (c < CHUNKS) {
+          const int r = c / (HD / 8), col = (c % (HD / 8)) * 8;
+          *(threadgroup packed_char4 *)(ks_[cur ^ 1] + r * LDQK + col) = rk0[i];
+          *(threadgroup packed_char4 *)(ks_[cur ^ 1] + r * LDQK + col + 4) = rk1[i];
+          *(threadgroup half4 *)(vs_[cur ^ 1] + r * LDK + col) = rv0[i];
+          *(threadgroup half4 *)(vs_[cur ^ 1] + r * LDK + col + 4) = rv1[i];
+        }
+      }
+      if (tid < BK) kscale_[cur ^ 1][tid] = rks;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    cur ^= 1;
+#endif
   }
   if (!active) return;
   const float r0 = 1.0f / l0, r1 = 1.0f / l1;

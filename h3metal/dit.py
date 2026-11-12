@@ -113,15 +113,9 @@ class DiT:
         self.heads_w, self.heads_b = wf.tensor("heads.w"), wf.tensor("heads.b")
         self.patch_dim = self.x_embed_w.shape[1]
         self._bufs = None
-        self.attn_cfg = dict(wm=32, bk=32)
+        self.attn_cfg = dict(wm=16, bk=32)
         # Integer score product in attention (queries and keys in int8, one scale per row).
         self.qk8 = os.environ.get("H3METAL_QK8", "1") == "1"
-        # The int8-score attention kernel: "v1" (kernels/attention.metal) or "v2" (kernels/attention2.metal) with
-        # its options, e.g. H3METAL_ATTN="v2:wm=16,bk=32,qr=2,PVH=1,DB=1".
-        spec = os.environ.get("H3METAL_ATTN", "v1")
-        self.attn_v2 = None
-        if spec.startswith("v2"):
-            self.attn_v2 = {k: int(v) for k, v in (kv.split("=") for kv in spec[3:].split(",") if kv)}
         self.resident = self._resident_blocks()
 
     def _resident_blocks(self) -> int:
@@ -194,13 +188,9 @@ class DiT:
         sc = dict(q_scale=b["qs"], k_scale=b["ks"]) if q8 else {}
         ops.qk_norm_rope(g, qkv, blk["q_norm"], blk["k_norm"], b["cos"], b["sin"], Qb, Kb, b["V"], M=S,
                          Hq=H, Hk=H, Hv=H, hd=hd, out_rows=Sp, rot=rot, eps=self.cfg["qk_eps"], **sc)
-        if q8 and self.attn_v2 is not None:
-            v2 = dict(self.attn_v2)
-            ops.attention_q8(g, Qb, Kb, b["V"], b["o"], Lq=S, L=S, H=H, KVH=H, D=hd, q_rows=Sp, k_rows=Sp,
-                             scale=hd ** -0.5, wm=v2.pop("wm", 16), bk=v2.pop("bk", 32), qr=v2.pop("qr", 2), **v2, **sc)
-        else:
-            ops.attention(g, Qb, Kb, b["V"], b["o"], Lq=S, L=S, H=H, KVH=H, D=hd, q_rows=Sp, k_rows=Sp,
-                          scale=hd ** -0.5, **self.attn_cfg, **sc)
+        # Int8 scores: keys and values double-buffered in threadgroup memory (kernels/attention.metal, DB).
+        ops.attention(g, Qb, Kb, b["V"], b["o"], Lq=S, L=S, H=H, KVH=H, D=hd, q_rows=Sp, k_rows=Sp,
+                      scale=hd ** -0.5, **self.attn_cfg, **({"DB": 1} if q8 else {}), **sc)
         ops.rot_q8(g, b["o"], a8.view((Sp, inner)), sa, S, inner)
         ops.gemm(g, a8.view((Sp, inner)), blk["out"], x, S, sa=sa, epi=1, rtype=rt, gate=g1, g_stride=g_stride,
                  **_tile(blk["out"], S))
@@ -290,10 +280,12 @@ class DiT:
 def _tile(w, M: int = 4096) -> dict:
     """Tile shape and dispatch order per product, from an interleaved sweep on an M6 (bench/gemm_bench.py)."""
     if w.fmt == "q8":
-        if w.K >= 12000:                      # fc2, in two dispatches over halves of K
-            return {"tile": (64, 256, 8), "ksplit": 2}
+        if w.K >= 12000:                      # fc2: wide tiles, K over four (~2048 x 2048) or two dispatches
+            return {"tile": (32, 512, 8), "ksplit": 4 if 2048 <= M < 8192 else 2}
         if w.K >= 7000:                       # attention output
-            return {"tile": (64, 256, 8) if M >= 2048 else (32, 128, 2)}
+            if M < 2048:
+                return {"tile": (32, 128, 2)}
+            return {"tile": (32, 256, 4), "ksplit": 2} if M < 8192 else {"tile": (64, 256, 8)}
         return {"tile": (64, 256, 8), "swz": 2 if M >= 2048 else 1}   # qkv, fc1
     if w.fmt == "q4":
         if w.K >= 12000:                      # fc2

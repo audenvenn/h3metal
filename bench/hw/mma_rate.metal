@@ -13,6 +13,9 @@ using namespace metal;
 #ifndef ITERS
 #define ITERS 4096
 #endif
+#ifndef CHAINS
+#define CHAINS 8
+#endif
 
 kernel void mma_rate(device ACC_TYPE *out [[buffer(0)]],
                      uint gid [[thread_position_in_grid]])
@@ -23,12 +26,19 @@ kernel void mma_rate(device ACC_TYPE *out [[buffer(0)]],
     b0[i] = IN_TYPE(float((gid * 3 + i) & 1));
     b1[i] = IN_TYPE(float((gid * 5 + i) & 1));
   }
-  nax::frag<ACC_TYPE> c0 = ACC_TYPE(0), c1 = ACC_TYPE(0), c2 = ACC_TYPE(0), c3 = ACC_TYPE(0);
+  // CHAINS independent accumulator pairs, so the products' latency overlaps and only their rate counts.
+  nax::frag<ACC_TYPE> c[2 * CHAINS];
+#pragma clang loop unroll(full)
+  for (short k = 0; k < 2 * CHAINS; k++) c[k] = ACC_TYPE(0);
   for (int it = 0; it < ITERS; it++) {
-    nax::mma<ACC_TYPE, IN_TYPE, IN_TYPE, false, false>(c0, c1, a, b0, b1);
-    nax::mma<ACC_TYPE, IN_TYPE, IN_TYPE, false, false>(c2, c3, a, b1, b0);
+#pragma clang loop unroll(full)
+    for (short k = 0; k < CHAINS; k++) nax::mma<ACC_TYPE, IN_TYPE, IN_TYPE, false, false>(c[2 * k], c[2 * k + 1], a, b0, b1);
   }
   float s = 0;
-  for (short i = 0; i < 8; i++) s += float(c0[i]) + float(c1[i]) + float(c2[i]) + float(c3[i]);
+#pragma clang loop unroll(full)
+  for (short k = 0; k < 2 * CHAINS; k++) {
+#pragma clang loop unroll(full)
+    for (short i = 0; i < 8; i++) s += float(c[k][i]);
+  }
   out[gid] = ACC_TYPE(s);
 }

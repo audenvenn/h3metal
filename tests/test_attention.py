@@ -4,7 +4,7 @@ import sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from h3metal.gpu import Gpu
-from h3metal.ops import attention, attention_q8
+from h3metal.ops import attention
 
 def ref_attn(q, k, v, scale, causal=False, off=0):
     H, Lq, D = q.shape
@@ -57,38 +57,7 @@ if __name__ == "__main__":
 
 
 
-def check_q8v2(Lq, L, H, KVH, D, wm=8, qr=2, bk=32, seed=0, **variant):
-    """kernels/attention2.metal against the float reference of the dequantized int8 queries and keys."""
-    rng = np.random.default_rng(seed)
-    gpu = Gpu()
-    q_rows = (Lq + 255) // 256 * 256
-    k_rows = (L + 63) // 64 * 64
-    q = rng.standard_normal((H, Lq, D)).astype(np.float32)
-    k = rng.standard_normal((KVH, L, D)).astype(np.float32)
-    v = rng.standard_normal((KVH, L, D)).astype(np.float16)
-
-    def q8(x):
-        s = np.abs(x).max(-1, keepdims=True) / 127
-        return np.rint(x / s).astype(np.int8), s[..., 0].astype(np.float32)
-    qi, qs = q8(q)
-    ki, ks = q8(k)
-    Q = gpu.empty((H, q_rows, D), "i8"); Q.numpy()[:, :Lq] = qi
-    K = gpu.empty((KVH, k_rows, D), "i8"); K.numpy()[:, :L] = ki
-    Vt = gpu.empty((KVH, k_rows, D), "f16"); Vt.numpy()[:, :L] = v
-    QS = gpu.empty((H, q_rows), "f32"); QS.numpy()[:, :Lq] = qs
-    KS = gpu.empty((KVH, k_rows), "f32"); KS.numpy()[:, :L] = ks
-    O = gpu.empty((q_rows, H * D), "f16")
-    attention_q8(gpu, Q, K, Vt, O, Lq=Lq, L=L, H=H, KVH=KVH, D=D, q_rows=q_rows, k_rows=k_rows, scale=D ** -0.5,
-                 q_scale=QS, k_scale=KS, wm=wm, qr=qr, bk=bk, **variant)
-    gpu.wait()
-    got = O.numpy()[:Lq].astype(np.float64)
-    ref = ref_attn(qi * qs[..., None], ki * ks[..., None], v, D ** -0.5)
-    err = np.abs(got - ref).max()
-    print(f"q8v2 qr={qr} wm={wm} bk={bk} {variant} Lq={Lq} L={L} H={H} KVH={KVH} D={D}: max abs err {err:.2e}")
-    assert err < 5e-3
-
-
-def check_q8(Lq, L, H, KVH, D, causal=False, wm=8, seed=0):
+def check_q8(Lq, L, H, KVH, D, causal=False, wm=8, seed=0, **variant):
     """Integer score product: per-row int8 queries and keys, against the float reference of the dequantized
     inputs."""
     rng = np.random.default_rng(seed)
@@ -111,7 +80,7 @@ def check_q8(Lq, L, H, KVH, D, causal=False, wm=8, seed=0):
     KS = gpu.empty((KVH, k_rows), "f32"); KS.numpy()[:, :L] = ks
     O = gpu.empty((q_rows, H * D), "f16")
     attention(gpu, Q, K, Vt, O, Lq=Lq, L=L, H=H, KVH=KVH, D=D, q_rows=q_rows, k_rows=k_rows, scale=D ** -0.5,
-              causal=causal, wm=wm, q_scale=QS, k_scale=KS)
+              causal=causal, wm=wm, q_scale=QS, k_scale=KS, **variant)
     gpu.wait()
     got = O.numpy()[:Lq].astype(np.float64)
     ref = ref_attn(qi * qs[..., None], ki * ks[..., None], v, D ** -0.5, causal)
@@ -126,15 +95,7 @@ if __name__ == "__main__":
     check_q8(130, 130, 8, 2, 128, causal=True)
     check_q8(64, 64, 4, 4, 64)
     print("ok q8")
-    for qr in (1, 2):
-        check_q8v2(100, 100, 2, 2, 128, qr=qr)
-        check_q8v2(300, 1037, 3, 3, 128, qr=qr)
-        check_q8v2(130, 130, 8, 2, 128, qr=qr, wm=4)
-        check_q8v2(64, 64, 4, 4, 64, qr=qr)
-        check_q8v2(1000, 1037, 2, 2, 96, qr=qr, bk=64)
-        check_q8v2(300, 1037, 3, 3, 128, qr=qr, PVH=1)
-        check_q8v2(1000, 4096, 2, 2, 128, qr=qr, bk=64, PVH=1)
-        check_q8v2(300, 1037, 3, 3, 128, qr=qr, DB=1)
-        check_q8v2(1000, 4096, 2, 2, 128, qr=qr, wm=16, DB=1, PVH=1)
-        check_q8v2(64, 64, 4, 4, 64, qr=qr, DB=1)
-    print("ok q8v2")
+    for wm in (8, 16):  # double-buffered keys and values (the transformer's configuration)
+        check_q8(300, 1037, 3, 3, 128, wm=wm, DB=1)
+        check_q8(64, 64, 4, 4, 64, wm=wm, DB=1)
+    print("ok q8 double-buffered")

@@ -48,12 +48,15 @@ software. The product's epilogue applies the two scales and, for the
 attention output and the MLP, the gated residual update directly to the
 float residual stream.
 
-The MLP's second product (K = 14,336) runs as two dispatches over halves of
-K, both accumulating into the residual stream: exact, and each dispatch's
-working set fits the caches better (22.9 ms instead of 27.6 ms at
-2048 x 2048 in int8). At that size a whole block takes 143 ms: the four
-products 73% (33 TOPS on average), attention 22%, and the norms, rotary
-embedding and rotations the remaining 5%.
+Long products run as several dispatches over slices of K, all accumulating
+into the residual stream: exact, and each dispatch's working set fits the
+caches better. The MLP's second product (K = 14,336) uses four slices around
+2048 x 2048 and two otherwise, with 32 x 512 tiles; the attention output
+(K = 7,168) two slices around 2048 x 2048. Tiles and splits come from
+interleaved A/B runs on a warm GPU, which is what a long generation runs on:
+a quick sweep on a cool GPU ranks them differently. At 2048 x 2048 a whole
+block takes 139 ms: the four products about 73% (33 TOPS on average),
+attention 22%, the norms, rotary embedding and rotations the remaining 5%.
 
 ### Rotation
 
@@ -101,6 +104,17 @@ instead of 29.9 ms per layer at 2048 x 2048, 0.48 s instead of 0.45 s at
 4096 x 4096. The attention is bound by vector work, not by the matrix
 units. (The matrix units also reject unsigned 8-bit operands in registers,
 which would have halved the probabilities' rounding error.)
+
+Keys and values are double-buffered in threadgroup memory: each thread loads
+its share of the next block into registers before the current block's
+products and stores it afterwards, so the loads overlap the products and one
+barrier per block remains instead of two (int8 keys leave room for two
+buffers). With 16 SIMD-groups per threadgroup this is 2% faster than the
+single-buffered kernel at 4096 x 4096. Also tried, and slower: 32 query
+rows per SIMD-group so that every key and value fragment feeds two products
+(register pressure: 2-5x slower), and accumulating each block's P V in half
+precision (the matrix units multiply half x half -> half no faster than
+half x half -> float: 18.7 against 19.2 TFLOPS).
 
 ## Memory
 
