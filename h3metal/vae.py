@@ -352,6 +352,30 @@ class VAEEncoder:
             ops.gemm(g, col, wt, out, M)
         return out, Ho, Wo
 
+    def _pbuf(self, role: str, n: int, H: int, W: int, C: int) -> Tensor:
+        """Padded half images [n][(H + 2)][(W + 2)][C], plus slack (a conv3x3 tile reads past the last row)."""
+        rows = n * (H + 2) * (W + 2) + 256
+        return self._buf(role, (rows, C), "f16")
+
+    def _gn_pad(self, x: Tensor, n: int, H: int, W: int, C: int, nb, role: str = "gnp") -> Tensor:
+        """GroupNorm + SiLU of x into reflect-bordered half images (a conv3x3 input)."""
+        g = self.gpu
+        stats = g.empty((n, 32, 2), "f32")
+        xp = self._pbuf(role, n, H, W, C)
+        ops.group_norm(g, x, stats, nb[0], nb[1], xp, N=n, HW=H * W, C=C, pad_w=W)
+        ops.fill_border(g, xp, H=H, W=W, C=C, batch=n, reflect=True)
+        return xp
+
+    def _conv3(self, xp: Tensor, n: int, H: int, W: int, cw, out: Tensor, accumulate: bool = False,
+               stride: int = 1):
+        """3x3 convolution of reflect-bordered half images (kernels/conv.metal) -> float [n*Ho*Wo][N]: stride 1
+        padded by one pixel all round, stride 2 padded (by reflection) on the bottom and right only."""
+        wt, k, cin, cout = cw
+        Ho, Wo = (H, W) if stride == 1 else ((H + 1 - 3) // 2 + 1, (W + 1 - 3) // 2 + 1)
+        ops.conv3x3(self.gpu, xp, wt, out, H=Ho, W=Wo, C=cin, epi=1 if accumulate else 0, tile=(64, 128, 8),
+                    batch=n, stride=stride, in_hw=(H, W), pad=1 if stride == 1 else 0)
+        return Ho, Wo
+
     def _gn(self, x: Tensor, n: int, HW: int, C: int, nb, stride_c: int, role: str = "gn"):
         g = self.gpu
         stats = g.empty((n, 32, 2), "f32")  # small; must start zeroed
@@ -375,9 +399,10 @@ class VAEEncoder:
         for res, down in self.levels:
             for r in res:
                 cout = r["c1"][3]
-                hn = self._gn(x, n, H * W, C, r["n1"], C, role="gn1")
-                h1, _, _ = self._conv(hn, H, W, n, r["c1"], out_role="h1")
-                h1n = self._gn(h1, n, H * W, cout, r["n2"], cout, role="gn2")
+                hn = self._gn_pad(x, n, H, W, C, r["n1"])
+                h1 = self._buf("h1", (n * H * W, r["c1"][0].N), "f32")
+                self._conv3(hn, n, H, W, r["c1"], h1)
+                h1n = self._gn_pad(h1, n, H, W, cout, r["n2"])
                 if "sc" in r:
                     xs = self._buf("half", (n * H * W, C), "f16")
                     ops.to_half(g, x, xs, n * H * W * C)
@@ -385,17 +410,21 @@ class VAEEncoder:
                     out, _, _ = self._conv(xs, H, W, n, r["sc"], out_role=roles[cur])
                 else:
                     out = x
-                self._conv(h1n, H, W, n, r["c2"], out=out, accumulate=True)
+                self._conv3(h1n, n, H, W, r["c2"], out, accumulate=True)
                 x, C = out, cout
             if down is not None:
                 cw, s_ = down
-                xs = self._buf("half", (n * H * W, C), "f16")
-                ops.to_half(g, x, xs, n * H * W * C)
+                xp = self._pbuf("downp", n, H, W, C)
+                ops.pad_half(g, x, xp, H=H, W=W, C=C, batch=n, reflect=True)
                 cur ^= 1
-                x, H, W = self._conv(xs, H, W, n, cw, stride=s_, out_role=roles[cur])
+                Ho, Wo = (H, W) if s_ == 1 else ((H + 1 - 3) // 2 + 1, (W + 1 - 3) // 2 + 1)
+                out = self._buf(roles[cur], (n * Ho * Wo, cw[0].N), "f32")
+                H, W = self._conv3(xp, n, H, W, cw, out, stride=s_)
+                x = out
             g.commit()
-        hn = self._gn(x, n, H * W, C, self.norm_out, C, role="gn1")
-        mom, H, W = self._conv(hn, H, W, n, self.conv_out, out_role="mom")
+        hn = self._gn_pad(x, n, H, W, C, self.norm_out)
+        mom = self._buf("mom", (n * H * W, self.conv_out[0].N), "f32")
+        self._conv3(hn, n, H, W, self.conv_out, mom)
         g.wait()
         return mom.numpy().reshape(n, H, W, -1)[..., :48].copy()
 

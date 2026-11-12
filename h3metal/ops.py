@@ -226,26 +226,32 @@ def softmax_rows(gpu: Gpu, s: Tensor, p: Tensor, M: int, L: int, *, valid: int |
 
 
 def conv3x3(gpu: Gpu, xp: Tensor, wt: QWeight, out: Tensor, *, H: int, W: int, C: int, epi: int = 0,
-            tile=(64, 128, 4)):
-    """out[H*W][N] = 3x3 convolution of a padded half image xp [(H+2)][(W+2)][C] (kernels/conv.metal; epi 1:
-    out += ...). wt: [N][9C] half, taps (ky, kx, c), with a bias."""
+            tile=(64, 128, 4), batch: int = 1, stride: int = 1, in_hw: tuple | None = None, pad: int = 1):
+    """out[batch*H*W][N] = 3x3 convolution of padded half images xp [batch][(Hi+2)][(Wi+2)][C] (kernels/conv.metal;
+    epi 1: out += ...). H, W: the output's sides; in_hw: the input's (default H, W); pad 1 reads the border as
+    the padding, pad 0 starts inside it (a strided convolution padded on its bottom and right by the border).
+    wt: [N][9C] half, taps (ky, kx, c), with a bias."""
     tm, tn, nsg = tile
     if C % 32 or wt.N % tn or wt.bias is None:
         raise ValueError(f"conv3x3: {C} input channels, {wt.N} outputs, bias {wt.bias is not None}")
+    hi, wi = in_hw or (H, W)
     out_t = OUT_DT[out.dtype] if epi == 0 else "float"
     k = gpu.kernel("conv.metal", "conv3x3", TM=tm, TN=tn, NSG=nsg, EPI=epi, OUT_T=out_t)
-    gpu.launch(k, (wt.N // tn, H * -(-W // tm), 1), (32 * nsg, 1, 1), [xp, wt.w, out, wt.bias],
-               pack("5i", H, W, C, wt.N, wt.K))
+    gpu.launch(k, (wt.N // tn, batch * H * -(-W // tm), 1), (32 * nsg, 1, 1), [xp, wt.w, out, wt.bias],
+               pack("10i", H, W, C, wt.N, wt.K, batch, stride, hi + 2, wi + 2, 1 - pad))
 
 
-def pad_half(gpu: Gpu, x: Tensor, xp: Tensor, *, H: int, W: int, C: int, up: int = 1):
-    """xp = the padded half image of x [H/up][W/up][C] (float) upsampled up times by nearest neighbour."""
+def pad_half(gpu: Gpu, x: Tensor, xp: Tensor, *, H: int, W: int, C: int, up: int = 1, batch: int = 1,
+             reflect: bool = False):
+    """xp = the padded half images of x [batch][H/up][W/up][C] (float) upsampled up times by nearest neighbour,
+    bordered with zeros or (reflect) the images' reflection."""
     k = gpu.kernel("conv.metal", "pad_half")
-    n = (H + 2) * (W + 2) * (C // 4)
-    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, xp], pack("4i", H, W, C, up))
+    n = batch * (H + 2) * (W + 2) * (C // 4)
+    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, xp], pack("6i", H, W, C, up, batch, int(reflect)))
 
 
-def zero_border(gpu: Gpu, xp: Tensor, *, H: int, W: int, C: int):
-    k = gpu.kernel("conv.metal", "zero_border")
-    n = (2 * (W + 2) + 2 * H) * (C // 4)
-    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [xp], pack("4i", H, W, C, 1))
+def fill_border(gpu: Gpu, xp: Tensor, *, H: int, W: int, C: int, batch: int = 1, reflect: bool = False):
+    """The one-pixel border of padded images whose inside is written: zeros, or the reflection of the inside."""
+    k = gpu.kernel("conv.metal", "fill_border")
+    n = batch * (2 * (W + 2) + 2 * H) * (C // 4)
+    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [xp], pack("6i", H, W, C, 1, batch, int(reflect)))

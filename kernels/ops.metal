@@ -567,7 +567,7 @@ kernel void im2col(device const half *x [[buffer(0)]],
 // deviations from the mean pass 0 found. stats[n][g] = (sum, sum of squared deviations).
 struct GnParams { int N, HW, C, G; float eps; int silu; int pass; int W; };
 #ifndef PADW
-#define PADW 0  // gn_apply: write into an image with a one-pixel zero border (the input of a conv3x3), N = 1
+#define PADW 0  // gn_apply: write the inside of images with a one-pixel border (the input of a conv3x3)
 #endif
 #define GN_CHUNK 2048
 
@@ -627,8 +627,8 @@ kernel void gn_apply(device const float *x [[buffer(0)]],
   float v = (x[size_t(pix) * p.C + c] - mean) * rsqrt(var + p.eps) * w[c] + b[c];
   if (p.silu) v = v / (1.0f + exp(-v));
 #if PADW
-  const int yy = pix / p.W, xx = pix % p.W;
-  y[(size_t(yy + 1) * (p.W + 2) + xx + 1) * p.C + c] = half(v);
+  const int H = p.HW / p.W, r = pix % p.HW, yy = r / p.W, xx = r % p.W;
+  y[((size_t(n) * (H + 2) + yy + 1) * (p.W + 2) + xx + 1) * p.C + c] = half(v);
 #else
   y[size_t(pix) * p.C + c] = half(v);
 #endif

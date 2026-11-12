@@ -11,12 +11,14 @@ All notable changes to this project are documented here. The format follows
 - Z-Image-Turbo (Tongyi-MAI, Apache-2.0), text to image: `h3metal download --model z-image-turbo`, then
   `h3metal convert` and `h3metal generate --model` on the converted directory (docs/zimage.md). Its
   transformer runs on the same int8 products and attention, its Qwen3-4B text encoder on h3metal/te.py.
-- Engine: 3x3 convolutions as matrix products without im2col (kernels/conv.metal), the FLUX autoencoder's
-  decoder (h3metal/flux_vae.py), a fused normalized-and-gated residual update, a row softmax, and
-  GroupNorm statistics that read whole rows.
+- Engine: 3x3 convolutions as matrix products without im2col (kernels/conv.metal: batches, strides, zero
+  or reflected borders), the FLUX autoencoder's decoder (h3metal/flux_vae.py), a fused normalized-and-gated
+  residual update, a row softmax, and GroupNorm statistics that read whole rows.
 
 ### Changed
 
+- The VAE encoder of edits uses the new convolutions: a reference encodes in 0.73 s instead of 0.88 s at
+  1024 x 1024 and 3.1 s instead of 3.8 s at 2048 x 2048, with the same result.
 - Attention with int8 scores is about 10% faster from 2048 x 2048 up (5% at
   1024 x 1024): the softmax updates its running maximum only when a score
   exceeds it by more than 8 (log2 units), keeps per-lane row sums and applies

@@ -174,7 +174,7 @@ class FluxVAEDecoder:
         """GroupNorm + SiLU of x [H*W][C] into a padded half image (a conv3x3 input)."""
         g = self.gpu
         xp = self._pbuf(role, H, W, C)
-        ops.zero_border(g, xp, H=H, W=W, C=C)
+        ops.fill_border(g, xp, H=H, W=W, C=C)
         stats = g.empty((1, self.G, 2), "f32")
         stats.numpy()[...] = 0
         ops.group_norm(g, x, stats, nb[0], nb[1], xp, N=1, HW=H * W, C=C, G=self.G, eps=1e-6, pad_w=W)
