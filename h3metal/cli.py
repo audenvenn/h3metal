@@ -8,6 +8,14 @@ import sys
 import time
 
 DEFAULT_MODEL = os.environ.get("H3METAL_MODEL", os.path.expanduser("~/.h3metal/model"))
+ZIMAGE_MODEL = os.path.expanduser("~/.h3metal/zimage")  # converted Z-Image-Turbo, by default
+MODEL_NAMES = {"zimage": ZIMAGE_MODEL, "z-image": ZIMAGE_MODEL, "z-image-turbo": ZIMAGE_MODEL,
+               "minimax-h3": DEFAULT_MODEL, "h3": DEFAULT_MODEL}
+
+
+def _model_dir(name: str) -> str:
+    """--model: a converted model's directory, or one of the names in MODEL_NAMES."""
+    return MODEL_NAMES.get(name.lower(), os.path.expanduser(name))
 
 
 AREAS = {"4k": 4096 * 4096, "2k": 2048 * 2048, "1k": 1024 * 1024}
@@ -83,6 +91,7 @@ def cmd_generate(a):
     from .pipeline import Pipeline, generate_edit
     from .zimage import ZImagePipeline, is_zimage_dir
     t0 = time.time()
+    a.model = _model_dir(a.model)
     if is_zimage_dir(a.model):
         if a.image:
             raise ValueError("Z-Image-Turbo makes images from text only; --image needs MiniMax-H3-Image")
@@ -132,8 +141,11 @@ def cmd_convert(a):
     if is_zimage_checkpoint(a.src):
         # Z-Image's 6 B transformer is 6.2 GB in int8, which fits every Mac h3metal runs on.
         dit = "q8" if a.dit == "auto" else FORMAT_ALIASES.get(a.dit, a.dit)
-        convert_zimage(a.src, a.out, dit=dit, te=a.te, parts=a.only.split(",") if a.only else None)
+        out = _model_dir(a.out) if a.out else ZIMAGE_MODEL  # never MiniMax-H3's directory by default
+        convert_zimage(a.src, out, dit=dit, te=a.te, parts=a.only.split(",") if a.only else None)
+        print(f"next: h3metal generate --model {'zimage' if out == ZIMAGE_MODEL else out} -p \"...\"")
         return
+    a.out = _model_dir(a.out) if a.out else DEFAULT_MODEL
     if a.dit == "auto":
         a.dit = auto_format()
         print(f"transformer format for this Mac: {a.dit} (choose another with --dit)")
@@ -168,10 +180,7 @@ def cmd_download(a):
         a.dest = os.path.expanduser("~/.h3metal/checkpoint" if a.model == "minimax-h3" else f"~/.h3metal/{a.model}")
     if not download(a.dest, a.source, a.jobs, model=a.model):
         sys.exit("some files did not download; run the command again to resume")
-    if a.model == "minimax-h3":
-        print(f"next: h3metal convert {a.dest}")
-    else:
-        print(f"next: h3metal convert {a.dest} --out ~/.h3metal/zimage")
+    print(f"next: h3metal convert {a.dest}")
 
 
 def _check_device(device: str):
@@ -188,6 +197,7 @@ def cmd_info(a):
           f"max buffer {g.max_buffer / 1e9:.1f} GB")
     _check_device(g.device)
     from .zimage import is_zimage_dir
+    a.model = _model_dir(a.model)
     print(f"model: {'Z-Image-Turbo' if is_zimage_dir(a.model) else 'MiniMax-H3-Image'} ({a.model})")
     for k in ("te", "dit", "vae") + (() if is_zimage_dir(a.model) else ("vision",)):
         p = os.path.join(a.model, f"{k}.h3m")
@@ -215,12 +225,13 @@ def main(argv=None):
     g.add_argument("--min-area", type=int, default=2048 * 2048,
                    help="smallest canvas the image is generated on (default 2048*2048, as released); "
                         "1024 generates at the requested size")
-    g.add_argument("--model", default=DEFAULT_MODEL)
+    g.add_argument("--model", default=DEFAULT_MODEL,
+                   help="a converted model's directory, or zimage / minimax-h3 for the default ones")
     g.set_defaults(func=cmd_generate)
     c = sub.add_parser("convert", help="convert the official weights into h3metal's format")
     c.add_argument("src", help="the MiniMax-H3-Image directory (transformer/, text_encoder/, vae/, ...), or a "
-                   "Z-Image-Turbo one (then --out should name another directory, e.g. ~/.h3metal/zimage)")
-    c.add_argument("--out", default=DEFAULT_MODEL)
+                   "Z-Image-Turbo one")
+    c.add_argument("--out", default=None, help="default ~/.h3metal/model (~/.h3metal/zimage for Z-Image-Turbo)")
     c.add_argument("--dit", default="auto", help="auto (by this Mac's memory), q8, mix (int8 attention, int4 MLP), "
                    "q4, q4g, or one per matrix: qkv,out,fc1,fc2 (e.g. q8,q8,q4,q4)")
     c.add_argument("--te", default="q8", help="text encoder weights: q8, q4g or f16")

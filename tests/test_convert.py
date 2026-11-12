@@ -140,6 +140,9 @@ def test_cli_sizes_and_device_check():
         except argparse.ArgumentTypeError:
             pass
     assert has_matrix_units("Apple M6") and has_matrix_units("Apple M5 Pro") and not has_matrix_units("Apple M4 Max")
+    from h3metal.cli import DEFAULT_MODEL, ZIMAGE_MODEL, _model_dir
+    assert _model_dir("zimage") == ZIMAGE_MODEL and _model_dir("Z-Image-Turbo") == ZIMAGE_MODEL
+    assert _model_dir("minimax-h3") == DEFAULT_MODEL and _model_dir("/some/dir") == "/some/dir"
     from h3metal.cli import auto_format
     assert [auto_format(g * 2**30) for g in (16, 24, 32, 64)] == ["q4", "mix", "q8", "q8"]
 
