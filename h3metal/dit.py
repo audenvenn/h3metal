@@ -116,6 +116,18 @@ class DiT:
         self.attn_cfg = dict(wm=32, bk=32)
         # Integer score product in attention (queries and keys in int8, one scale per row).
         self.qk8 = os.environ.get("H3METAL_QK8", "1") == "1"
+        self.resident = self._resident_blocks()
+
+    def _resident_blocks(self) -> int:
+        """How many blocks' weights can stay in memory between steps. When the transformer does not fit, the
+        first `resident` blocks stay and the rest stream from the file every step: read ahead while earlier
+        blocks run, and released right after use, so that the kernel evicts them rather than the resident
+        ones (plain least-recently-used eviction would re-read the whole file every step)."""
+        per = self.wf.nbytes([f"blocks.0.{k}" for k in ("qkv", "out", "fc1", "fc2")])
+        gb = os.environ.get("H3METAL_RESIDENT_GB")
+        # Metal's working-set estimate, less room for activations (up to ~3 GB at 4096 x 4096) and a margin.
+        budget = float(gb) * 1e9 if gb else self.gpu.working_set - 5e9
+        return self.L if per * self.L <= budget else max(0, min(self.L, int(budget // per)))
 
     # -- buffers ---------------------------------------------------------------------------------------------------
     def _alloc(self, S: int):
@@ -155,6 +167,10 @@ class DiT:
         """Asks the kernel to read block l's weights ahead (a no-op when they are already in memory)."""
         if 0 <= l < self.L:
             self.wf.prefetch([f"blocks.{l}.{k}" for k in ("qkv", "out", "fc1", "fc2")])
+
+    def _release(self, l: int):
+        """Marks a streamed block's weights as the first pages to evict."""
+        self.wf.release([f"blocks.{l}.{k}" for k in ("qkv", "out", "fc1", "fc2")])
 
     # -- pieces ----------------------------------------------------------------------------------------------------
     def _block(self, b, blk, S: int, x: Tensor, mod1: Tensor, mod2: Tensor, g1: Tensor, g2: Tensor, rt: Tensor,
@@ -234,8 +250,11 @@ class DiT:
                        K=self.patch_dim)
         L3 = 3 * 2 * D  # elements per (step, layer) in the modulation tables
         self._prefetch(0)
+        self._prefetch(1)
         for l, blk in enumerate(self.blocks):
-            self._prefetch(l + 1)
+            self._prefetch(l + 2)
+            if l - 2 >= self.resident:  # two blocks back: finished, or at least wired by its command buffer
+                self._release(l - 2)
             o = (s * self.L + l)
             mod1 = self.mod_attn.view((3, 2, D), offset_elems=o * L3)
             mod2 = self.mod_mlp.view((3, 2, D), offset_elems=o * L3)
@@ -252,6 +271,8 @@ class DiT:
         hb = self.heads_b.view((self.patch_dim,), offset_elems=s * self.patch_dim)
         ops.linear_f32(g, y, hw, hb, b["vel"], M=n_img, N=self.patch_dim, K=D)
         g.wait()
+        for l in range(max(self.resident, self.L - 2), self.L):
+            self._release(l)
         return b["vel"].numpy()[:n_img].copy()
 
 

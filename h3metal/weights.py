@@ -168,13 +168,27 @@ class WeightFile:
         bias = self.map.tensor(e["bias"]["offset"], (N,), "f32") if "bias" in e else None
         return QWeight(fmt, w, sw, N, K, e.get("G", 128), bias)
 
-    def prefetch(self, names=None):
-        """Ask the kernel to read ahead the given entries (all of them by default)."""
+    def _advise(self, names, advice: int):
         for name in (names or self.entries):
             e = self.entries[name]
             parts = [e] if "offset" in e else [e[k] for k in ("w", "sw", "bias") if k in e]
             for p in parts:
-                self.map.advise(p["offset"], p["nbytes"], 1)
+                self.map.advise(p["offset"], p["nbytes"], advice)
+
+    def prefetch(self, names=None):
+        """Ask the kernel to read ahead the given entries (all of them by default)."""
+        self._advise(names, 1)
+
+    def release(self, names):
+        """Tell the kernel these entries' pages are the first to evict (they are read again from the file)."""
+        self._advise(names, 4)
+
+    def nbytes(self, names) -> int:
+        total = 0
+        for name in names:
+            e = self.entries[name]
+            total += e["nbytes"] if "offset" in e else sum(e[k]["nbytes"] for k in ("w", "sw", "bias") if k in e)
+        return total
 
     def close(self):
         self.map.close()

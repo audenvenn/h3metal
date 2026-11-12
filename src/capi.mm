@@ -157,7 +157,11 @@ int h3_map_advise(h3_map *m, uint64_t offset, uint64_t length, int advice) {
   const size_t page = h3::Metal::page_size();
   uint64_t a = offset / page * page;
   uint64_t b = std::min<uint64_t>(h3::Metal::round_up(offset + length, page), m->mapped);
-  int adv = advice == 1 ? MADV_WILLNEED : advice == 2 ? MADV_SEQUENTIAL : advice == 3 ? MADV_RANDOM : MADV_NORMAL;
+  int adv = advice == 1   ? MADV_WILLNEED
+            : advice == 2 ? MADV_SEQUENTIAL
+            : advice == 3 ? MADV_RANDOM
+            : advice == 4 ? MADV_DONTNEED  // first in line for eviction
+                          : MADV_NORMAL;
   return madvise((uint8_t *)m->data + a, b - a, adv);
 }
 
