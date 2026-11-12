@@ -261,7 +261,7 @@ def _tile(w, M: int = 4096) -> dict:
         if w.K >= 12000:                      # fc2
             return {"tile": (64, 256, 8)}
         if w.K >= 7000:                       # attention output
-            return {"tile": (32, 256, 4) if M >= 2048 else (32, 128, 2)}
+            return {"tile": (64, 256, 8) if M >= 2048 else (32, 128, 2)}
         return {"tile": (64, 256, 8), "swz": 2 if M >= 2048 else 1}   # qkv, fc1
     if w.fmt == "q4":
         if w.K >= 7000:                       # attention output, fc2
