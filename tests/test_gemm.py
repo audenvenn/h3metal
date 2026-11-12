@@ -20,7 +20,7 @@ def pack_int4(q: np.ndarray) -> np.ndarray:
 def check(fmt, M=200, N=256, K=512, epi=0, out_dtype="f16", seed=0, tile=(64, 128, 4)):
     rng = np.random.default_rng(seed)
     gpu = Gpu()
-    m_pad = (M + 63) // 64 * 64
+    m_pad = (M + 127) // 128 * 128
     G = 128
     a = rng.integers(-127, 128, size=(m_pad, K), dtype=np.int8)
     sa = rng.uniform(0.001, 0.01, size=m_pad).astype(np.float32)

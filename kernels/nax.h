@@ -7,7 +7,8 @@
 // fragments can be loaded from memory straight into the registers a product
 // consumes, and a product's result can feed the next one without a round trip
 // through threadgroup memory.
-#pragma once
+#ifndef H3_NAX_H
+#define H3_NAX_H
 
 #include <metal_stdlib>
 #include <metal_tensor>
@@ -138,3 +139,5 @@ inline void row_sum(const thread frag<float> &f, thread float &r0, thread float 
 }
 
 }  // namespace nax
+
+#endif

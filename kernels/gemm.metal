@@ -34,6 +34,15 @@ using namespace mpp::tensor_ops;
 #ifndef WFMT
 #define WFMT 1
 #endif
+#ifndef TM
+#define TM 64
+#endif
+#ifndef TN
+#define TN 128
+#endif
+#ifndef NSG
+#define NSG 4
+#endif
 #ifndef EPI
 #define EPI 0
 #endif
