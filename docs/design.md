@@ -85,6 +85,16 @@ before the softmax. P V stays in half precision. A layer's attention takes
 29.6 ms instead of 37.5 ms at 2048 x 2048 and 0.46 s instead of 0.56 s at
 4096 x 4096, where attention is half of a block's time.
 
+P V in int8 does not pay on this GPU. With V in int8 (one scale per row)
+and each block of probabilities quantized per row against its largest
+value, the result stays within 1% of the float product, but the extra work
+per score (the V scales, the block maximum, the rounding, the scaling back
+into the float output) costs more than the faster product saves: 32.2 ms
+instead of 29.9 ms per layer at 2048 x 2048, 0.48 s instead of 0.45 s at
+4096 x 4096. The attention is bound by vector work, not by the matrix
+units. (The matrix units also reject unsigned 8-bit operands in registers,
+which would have halved the probabilities' rounding error.)
+
 ## Memory
 
 Weight files (`.h3m`) are mapped read-only and handed to Metal without a copy,
