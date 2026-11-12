@@ -33,15 +33,21 @@ def cmd_generate(a):
     t0 = time.time()
     pipe = Pipeline(a.model)
     w, h = a.size
-    if a.image:
-        refs = [Image.open(p) for p in a.image]
-        img, timing = generate_edit(pipe, a.prompt, refs, w, h, seed=a.seed, min_area=a.min_area,
-                                    progress=_progress)
-    else:
-        img, timing = pipe.generate(a.prompt, w, h, seed=a.seed, min_area=a.min_area, progress=_progress)
-    out = a.output or f"h3metal_{int(time.time())}.png"
-    Image.fromarray(img).save(out)
-    print(f"{out}: {w}x{h}, seed {a.seed}; {timing}; wall {time.time() - t0:.1f}s")
+    for i in range(a.count):
+        seed = a.seed + i
+        t1 = time.time()
+        if a.image:
+            refs = [Image.open(p) for p in a.image]
+            img, timing = generate_edit(pipe, a.prompt, refs, w, h, seed=seed, min_area=a.min_area,
+                                        progress=_progress)
+        else:
+            img, timing = pipe.generate(a.prompt, w, h, seed=seed, min_area=a.min_area, progress=_progress)
+        out = a.output or f"h3metal_{int(time.time())}.png"
+        if a.count > 1:
+            stem, ext = os.path.splitext(out)
+            out = f"{stem}_{seed}{ext or '.png'}"
+        Image.fromarray(img).save(out)
+        print(f"{out}: {w}x{h}, seed {seed}; {timing}; wall {time.time() - (t0 if i == 0 else t1):.1f}s")
 
 
 def cmd_convert(a):
@@ -95,6 +101,7 @@ def main(argv=None):
     g.add_argument("-p", "--prompt", required=True)
     g.add_argument("-s", "--size", type=_size, default=(2048, 2048), help="WIDTHxHEIGHT (default 2048x2048)")
     g.add_argument("--seed", type=int, default=0)
+    g.add_argument("-n", "--count", type=int, default=1, help="images to make, with seeds seed, seed+1, ...")
     g.add_argument("-o", "--output")
     g.add_argument("-i", "--image", action="append", help="reference image (repeat for several); makes it an edit")
     g.add_argument("--min-area", type=int, default=2048 * 2048,

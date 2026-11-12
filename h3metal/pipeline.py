@@ -62,6 +62,7 @@ class Pipeline:
         if prompt in self._te_cache:
             return self._te_cache[prompt]
         from .te import TextEncoder
+        self.release()
         t = time.time()
         wf = WeightFile(self.gpu, self.paths["te"])
         te = TextEncoder(self.gpu, wf)
@@ -72,17 +73,37 @@ class Pipeline:
         self._te_cache = {prompt: emb}
         return emb
 
+    def _dit(self, timing: Timing):
+        """The transformer, mapped once and kept for the following requests."""
+        if getattr(self, "_model", None) is None:
+            t = time.time()
+            self._dit_wf = WeightFile(self.gpu, self.paths["dit"])
+            self._model = ditm.DiT(self.gpu, self._dit_wf)
+            timing.add("load", time.time() - t)
+        return self._model
+
+    def release(self):
+        """Unmaps the transformer (before the text encoder needs the memory)."""
+        if getattr(self, "_model", None) is not None:
+            self._model.free()
+            self._model = None
+            self._dit_wf.close()
+            self._dit_wf = None
+
     def denoise(self, emb: np.ndarray, lat_h: int, lat_w: int, seed: int, timing: Timing,
                 refs=None, ref_rows=None, text_types=None, latents: np.ndarray | None = None,
                 progress=None) -> np.ndarray:
         g = self.gpu
+        model = self._dit(timing)
         t = time.time()
-        wf = WeightFile(g, self.paths["dit"])
-        model = ditm.DiT(g, wf)
         T = emb.shape[0]
-        text = g.empty((ditm.ops.pad_rows(T, 128), emb.shape[1]), "bf16")
-        text.numpy()[:T] = bf16_bits(emb)
-        rows = model.encode_text(text, T)
+        key = (emb.shape, float(emb[0, :8].sum()), float(emb[-1, :8].sum()), refs is None)
+        if getattr(self, "_rows_key", None) != key or text_types is not None:
+            text = g.empty((ditm.ops.pad_rows(T, 128), emb.shape[1]), "bf16")
+            text.numpy()[:T] = bf16_bits(emb)
+            self._rows = model.encode_text(text, T)
+            self._rows_key = key
+        rows = self._rows
         refs = refs or []
         tt = np.ones(T, np.uint8) if text_types is None else text_types
         lay = ditm.Layout(T, tt, refs, lat_h, lat_w)
@@ -93,7 +114,7 @@ class Pipeline:
         x = ditm.patchify(latents.astype(np.float32))
         n_ref = lay.n_ref_rows
         cond = ref_rows if ref_rows is not None else np.zeros((0, x.shape[1]), np.float32)
-        timing.add("load", time.time() - t)
+        timing.add("text rows", time.time() - t)
         for s in range(model.n_steps):
             t = time.time()
             v = model.step(s, rows, np.concatenate([cond, x]) if n_ref else x)
@@ -101,9 +122,6 @@ class Pipeline:
             timing.add("denoise", time.time() - t)
             if progress:
                 progress(s + 1, model.n_steps)
-        model.free()
-        del model
-        wf.close()
         return ditm.unpatchify(x, C, lat_h, lat_w)
 
     def decode(self, lat: np.ndarray, timing: Timing) -> np.ndarray:
@@ -118,7 +136,8 @@ class Pipeline:
 
     def generate(self, prompt: str, width: int = 2048, height: int = 2048, seed: int = 0,
                  min_area: int = DEFAULT_MIN_AREA, progress=None, latents: np.ndarray | None = None):
-        """-> (uint8 image [H][W][3], Timing)."""
+        """-> (uint8 image [H][W][3], Timing). The prompt's embeddings and the transformer are kept for the next
+        call, so further images of the same prompt cost the denoising and the decode only."""
         timing = Timing()
         ch, cw = ditm.canvas_size(height, width, min_area)
         emb = self.encode_prompt(prompt, timing)
@@ -157,6 +176,7 @@ def edit_inputs(pipe: "Pipeline", prompt: str, images, draws: _Draws):
     from PIL import ImageOps
     from . import edit
     from .weights import WeightFile
+    pipe.release()
     imgs = [ImageOps.exif_transpose(im).convert("RGB") for im in images]
     for im in imgs:
         if min(im.size) < 32:
@@ -225,6 +245,7 @@ def generate_edit(pipe: "Pipeline", prompt: str, images, width: int, height: int
     ids, types, pos3, rows, feats, deep, ref_lats = edit_inputs(pipe, prompt, images, draws)
     timing.add("references", time.time() - t)
     t = time.time()
+    pipe.release()
     wf = WeightFile(pipe.gpu, pipe.paths["te"])
     emb = TextEncoder(pipe.gpu, wf).encode(ids, pos3=pos3, vision=feats, vision_rows=rows, deepstack=deep)
     wf.close()
