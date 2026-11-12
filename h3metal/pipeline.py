@@ -37,13 +37,9 @@ class Timing:
 
 
 def noise(seed: int, shape) -> np.ndarray:
-    """Standard normal noise. With torch installed, the same draws as the reference pipeline's CPU generator."""
-    try:
-        import torch  # noqa: F401
-        g = torch.Generator("cpu").manual_seed(seed)
-        return torch.randn(shape, generator=g, dtype=torch.float32).numpy()
-    except ImportError:
-        return np.random.default_rng(seed).standard_normal(shape, dtype=np.float32)
+    """Standard normal noise: the draws of the official pipeline's torch CPU generator for this seed."""
+    from .rng import TorchRandn
+    return TorchRandn(seed).normal(shape)
 
 
 class Pipeline:
@@ -149,18 +145,11 @@ class _Draws:
     """The request's random draws, in the order the released pipeline takes them from its generator."""
 
     def __init__(self, seed: int):
-        try:
-            import torch
-            self.g = torch.Generator("cpu").manual_seed(seed)
-            self.torch = torch
-        except ImportError:
-            self.g = np.random.default_rng(seed)
-            self.torch = None
+        from .rng import TorchRandn
+        self.g = TorchRandn(seed)
 
     def normal(self, shape) -> np.ndarray:
-        if self.torch is not None:
-            return self.torch.randn(shape, generator=self.g, dtype=self.torch.float32).numpy()
-        return self.g.standard_normal(shape, dtype=np.float32)
+        return self.g.normal(shape)
 
 
 def edit_inputs(pipe: "Pipeline", prompt: str, images, draws: _Draws):

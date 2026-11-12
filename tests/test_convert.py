@@ -117,6 +117,15 @@ def test_edit_positions_and_patches():
     assert grid == (1, 2, 4) and p.shape == (8, 3 * 2 * 16 * 16) and np.allclose(p, -1.0)
 
 
+def test_torch_randn_replica():
+    # First values of torch.randn((32,), generator=torch.Generator("cpu").manual_seed(0)), recorded from torch 2.15.
+    from h3metal.rng import TorchRandn
+    got = TorchRandn(0).normal((32,))
+    want = np.array([-1.1258398, -1.1523602, -0.2505786, -0.4338788, 0.8487104, 0.6920092, -0.3160128, -2.1152196],
+                    np.float32)
+    assert np.allclose(got[:8], want, atol=1e-6), got[:8]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
