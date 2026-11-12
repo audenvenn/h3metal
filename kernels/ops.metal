@@ -452,3 +452,99 @@ kernel void swiglu(device const half *in [[buffer(0)]],
   const float g = float(row[p.F + j]);
   out[size_t(m) * p.F + j] = half(float(row[j]) * g / (1.0f + exp(-g)));
 }
+
+// ---- Convolutions as matrix products (the VAE encoder) ----------------------
+// Activations are NHWC. im2col writes, for every output pixel of a 3x3 (or
+// 1x1) convolution, the KH*KW*C input values it reads, in (ky, kx, c) order,
+// padded with zeros to K columns. Out-of-image taps read the reflection of
+// the image (no edge repeat); pad_t/pad_l give the padding before the first
+// row/column, the bottom/right side is whatever the stride leaves.
+struct Im2colParams { int N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K; };
+
+static inline int reflect(int i, int n) {
+  if (i < 0) i = -i;
+  if (i >= n) i = 2 * n - 2 - i;
+  return i;
+}
+
+kernel void im2col(device const half *x [[buffer(0)]],
+                   device half *col [[buffer(1)]],
+                   constant Im2colParams &p [[buffer(2)]],
+                   uint gid [[thread_position_in_grid]])
+{
+  // one thread per (4 channels, tap, output pixel), flattened in that order
+  const int C4 = (p.C + 3) / 4, taps = p.KH * p.KW;
+  const int c4 = (int(gid) % C4) * 4;
+  const int tap = (int(gid) / C4) % taps;
+  const int pix = int(gid) / (C4 * taps);
+  if (pix >= p.N * p.Ho * p.Wo) return;
+  const int n = pix / (p.Ho * p.Wo), r = pix % (p.Ho * p.Wo);
+  const int oy = r / p.Wo, ox = r % p.Wo;
+  const int ky = tap / p.KW, kx = tap % p.KW;
+  const int iy = reflect(oy * p.stride + ky - p.pad_t, p.H), ix = reflect(ox * p.stride + kx - p.pad_l, p.W);
+  const device half *src = x + ((size_t(n) * p.H + iy) * p.W + ix) * p.C + c4;
+  device half *dst = col + size_t(pix) * p.K + tap * p.C + c4;
+  if ((p.C & 3) == 0) {
+    *(device half4 *)dst = *(const device half4 *)src;
+  } else {
+    for (int i = 0; i < 4 && c4 + i < p.C; i++) dst[i] = src[i];
+  }
+}
+
+// GroupNorm statistics per image and group, in two passes: pass 0 sums the values, pass 1 the squared
+// deviations from the mean pass 0 found. stats[n][g] = (sum, sum of squared deviations).
+struct GnParams { int N, HW, C, G; float eps; int silu; int pass; };
+
+kernel void gn_stats(device const float *x [[buffer(0)]],
+                     device atomic_float *stats [[buffer(1)]],
+                     constant GnParams &p [[buffer(2)]],
+                     uint3 gid [[thread_position_in_grid]])
+{
+  // thread: (channel group, image, a run of 64 pixels)
+  const int g = int(gid.x), n = int(gid.y), p0 = int(gid.z) * 64;
+  if (g >= p.G || n >= p.N || p0 >= p.HW) return;
+  const int cg = p.C / p.G;
+  float mean = 0;
+  if (p.pass == 1) {
+    device const float *st = (device const float *)stats;
+    mean = st[(n * p.G + g) * 2] / float(p.HW * cg);
+  }
+  float s = 0;
+  for (int px = p0; px < min(p0 + 64, p.HW); px++) {
+    const device float *row = x + (size_t(n) * p.HW + px) * p.C + g * cg;
+    for (int c = 0; c < cg; c++) {
+      const float v = row[c] - mean;
+      s += p.pass == 1 ? v * v : v;
+    }
+  }
+  atomic_fetch_add_explicit(&stats[(n * p.G + g) * 2 + p.pass], s, memory_order_relaxed);
+}
+
+// y = (x - mean) / std * w + b, optionally SiLU, float in -> half out.
+kernel void gn_apply(device const float *x [[buffer(0)]],
+                     device const float *sums [[buffer(1)]],
+                     device const float *w [[buffer(2)]],
+                     device const float *b [[buffer(3)]],
+                     device half *y [[buffer(4)]],
+                     constant GnParams &p [[buffer(5)]],
+                     uint2 gid [[thread_position_in_grid]])
+{
+  const int c = int(gid.x), pix = int(gid.y);
+  if (c >= p.C || pix >= p.N * p.HW) return;
+  const int n = pix / p.HW, g = c / (p.C / p.G);
+  const float cnt = float(p.HW * (p.C / p.G));
+  const float mean = sums[(n * p.G + g) * 2] / cnt;
+  const float var = sums[(n * p.G + g) * 2 + 1] / cnt;
+  float v = (x[size_t(pix) * p.C + c] - mean) * rsqrt(var + p.eps) * w[c] + b[c];
+  if (p.silu) v = v / (1.0f + exp(-v));
+  y[size_t(pix) * p.C + c] = half(v);
+}
+
+// y = half(x), n elements.
+kernel void to_half(device const float *x [[buffer(0)]],
+                    device half *y [[buffer(1)]],
+                    constant int &n [[buffer(2)]],
+                    uint i [[thread_position_in_grid]])
+{
+  if (int(i) < n) y[i] = half(x[i]);
+}

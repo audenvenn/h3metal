@@ -242,8 +242,9 @@ def edit_inputs(pipe: "Pipeline", prompt: str, images, draws: _Draws):
     pos3 = edit.edit_positions(mm, grids)
     rows = np.nonzero(mm)[0]
     # VAE posteriors: one sample per reference, first draws of the generator.
+    from .vae import VAEEncoder
     wf = WeightFile(pipe.gpu, pipe.paths["vae"])
-    enc = edit.VAEEncoder({k: wf.host(k) for k in wf.entries if k.startswith(("encoder.", "quant_conv."))})
+    enc = VAEEncoder(pipe.gpu, wf)
     lat_mean = np.array(wf.meta["latents_mean"], np.float32)[:, None, None]
     lat_std = np.array(wf.meta["latents_std"], np.float32)[:, None, None]
     ref_lats = []

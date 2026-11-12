@@ -1,6 +1,6 @@
 """The parts only an edit needs: the Qwen3-VL vision tower (with its DeepStack
-features), the multimodal positions of the text encoder's input, and the VAE
-encoder. They run once per reference image, on MLX.
+features), which runs once per reference image on MLX, and the multimodal
+positions of the text encoder's input. The VAE encoder is in vae.py.
 """
 
 from __future__ import annotations
@@ -11,8 +11,6 @@ import numpy as np
 
 PATCH, TPATCH, MERGE = 16, 2, 2
 VIS_MEAN = VIS_STD = 0.5
-PIX_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
-PIX_STD = np.array([0.229, 0.224, 0.225], np.float32)
 
 
 # -- sizes and resizing (diffusers MiniMaxH3ImageEditResizeStep) -------------------------------------------------
@@ -202,129 +200,3 @@ def edit_positions(tags_image: np.ndarray, grids) -> np.ndarray:
             cur += max(h, w) // MERGE
         i = j
     return np.concatenate(out, 1)
-
-
-# -- VAE encoder ----------------------------------------------------------------------------------------------------
-class VAEEncoder:
-    """The causal 3-D CNN encoder of MiniMax-H3 run on one frame: every 3x3x3 kernel reduces to its last temporal
-    tap. weights: the checkpoint's encoder.* / quant_conv.* tensors."""
-
-    def __init__(self, weights: dict, block_out=(128, 256, 256, 512, 512, 1024), layers_per_block: int = 2,
-                 spatial_down=(2, 2, 2, 2, 1, 1), temporal_down=(1, 2, 2, 1, 1, 1), half: bool = True):
-        """half: convolutions in float16 (norm statistics and residual sums stay float32)."""
-        import mlx.core as mx
-        self.mx = mx
-        self.cdt = mx.float16 if half else mx.float32
-
-        def conv(name, temporal=True):
-            w = weights[name + ".weight"]
-            if w.ndim == 5:
-                w = w[:, :, -1]                       # last temporal tap
-            return (mx.array(np.ascontiguousarray(w.transpose(0, 2, 3, 1))).astype(self.cdt),
-                    mx.array(weights[name + ".bias"]))
-        self.conv_in = conv("encoder.conv_in")
-        self.levels = []
-        cin = block_out[0]
-        for lv, cout in enumerate(block_out):
-            res = []
-            for j in range(layers_per_block):
-                p = f"encoder.down.{lv}.block.{j}"
-                r = {"n1": (mx.array(weights[p + ".norm1.weight"]), mx.array(weights[p + ".norm1.bias"])),
-                     "c1": conv(p + ".conv1"),
-                     "n2": (mx.array(weights[p + ".norm2.weight"]), mx.array(weights[p + ".norm2.bias"])),
-                     "c2": conv(p + ".conv2")}
-                if (cin if j == 0 else cout) != cout:
-                    r["sc"] = conv(p + ".nin_shortcut")
-                res.append(r)
-            down = None
-            if spatial_down[lv] * temporal_down[lv] > 1:
-                down = (conv(f"encoder.down.{lv}.downsample.conv"), spatial_down[lv])
-            self.levels.append((res, down))
-            cin = cout
-        self.norm_out = (mx.array(weights["encoder.norm_out.weight"]), mx.array(weights["encoder.norm_out.bias"]))
-        self.conv_out = conv("encoder.conv_out")
-        qw = weights["quant_conv.weight"].reshape(48, 48)
-        self.quant = (mx.array(qw), mx.array(weights["quant_conv.bias"]))
-
-    def _gn(self, x, nb, groups=32, eps=1e-6):
-        mx = self.mx
-        N, Hh, Ww, C = x.shape
-        g = x.reshape(N, Hh * Ww, groups, C // groups)
-        mean = g.mean(axis=(1, 3), keepdims=True)
-        var = ((g - mean) ** 2).mean(axis=(1, 3), keepdims=True)
-        g = (g - mean) * mx.rsqrt(var + eps)
-        return g.reshape(N, Hh, Ww, C) * nb[0] + nb[1]
-
-    def _reflect(self, x, top, bottom, left, right):
-        mx = self.mx
-        if top or bottom:
-            parts = []
-            if top:
-                parts.append(x[:, 1:top + 1][:, ::-1])
-            parts.append(x)
-            if bottom:
-                parts.append(x[:, -bottom - 1:-1][:, ::-1])
-            x = mx.concatenate(parts, 1)
-        if left or right:
-            parts = []
-            if left:
-                parts.append(x[:, :, 1:left + 1][:, :, ::-1])
-            parts.append(x)
-            if right:
-                parts.append(x[:, :, -right - 1:-1][:, :, ::-1])
-            x = mx.concatenate(parts, 2)
-        return x
-
-    def _conv3(self, x, wb, stride=1, pad=True):
-        mx = self.mx
-        if pad:
-            x = self._reflect(x, 1, 1, 1, 1)
-        return mx.conv2d(x.astype(self.cdt), wb[0], stride=stride).astype(mx.float32) + wb[1]
-
-    def _silu(self, x):
-        return x * self.mx.sigmoid(x)
-
-    def encode_tile(self, x):
-        """x: [N][H][W][3] normalized pixels -> moments [N][h][w][48]."""
-        mx = self.mx
-        x = self._conv3(x, self.conv_in)
-        for res, down in self.levels:
-            for r in res:
-                h = self._conv3(self._silu(self._gn(x, r["n1"])), r["c1"])
-                h = self._conv3(self._silu(self._gn(h, r["n2"])), r["c2"])
-                sc = x if "sc" not in r else mx.conv2d(x.astype(self.cdt), r["sc"][0]).astype(mx.float32) + r["sc"][1]
-                x = sc + h
-            if down is not None:
-                wb, s = down
-                if s == 2:
-                    x = self._reflect(x, 0, 1, 0, 1)
-                x = self._conv3(x, wb, stride=s, pad=False)
-            mx.eval(x)
-        x = self._conv3(self._silu(self._gn(x, self.norm_out)), self.conv_out)
-        x = x @ self.quant[0].T + self.quant[1]
-        mx.eval(x)
-        return x
-
-    def encode(self, img: np.ndarray, tile: int = 256, overlap: int = 64):
-        """uint8 [H][W][3] (cropped to multiples of 16) -> (mean, std) [24][h][w], tiled like the release."""
-        from .vae import split_tiles, stitch
-        mx = self.mx
-        x = (img.astype(np.float32) / 255.0 - PIX_MEAN) / PIX_STD
-        H, W = x.shape[:2]
-        ys, yl, yo = split_tiles(H, tile, overlap, 16)
-        xs, xl, xo = split_tiles(W, tile, overlap, 16)
-        # Tiles of one size run as a batch (16 at a time) through the same convolutions.
-        jobs = [(i, j, y, ly, x0, lx) for i, (y, ly) in enumerate(zip(ys, yl)) for j, (x0, lx) in enumerate(zip(xs, xl))]
-        done = {}
-        for shape in sorted({(ly, lx) for _, _, _, ly, _, lx in jobs}):
-            same = [jb for jb in jobs if (jb[3], jb[5]) == shape]
-            for c in range(0, len(same), 16):
-                batch = same[c:c + 16]
-                xb = np.stack([x[y:y + ly, x0:x0 + lx] for _, _, y, ly, x0, lx in batch])
-                m = np.array(self.encode_tile(mx.array(xb)))
-                for k, (i, j, *_r) in enumerate(batch):
-                    done[(i, j)] = m[k].transpose(2, 0, 1)
-        rows = [[done[(i, j)] for j in range(len(xs))] for i in range(len(ys))]
-        mom = stitch(rows, [o // 16 for o in yo], [o // 16 for o in xo])
-        mean, logvar = mom[:24], np.clip(mom[24:], -30.0, 20.0)
-        return mean, np.exp(0.5 * logvar)

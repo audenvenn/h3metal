@@ -137,3 +137,31 @@ def layer_norm(gpu: Gpu, x: Tensor, w: Tensor, b: Tensor, out: Tensor, M: int, D
 def swiglu(gpu: Gpu, x: Tensor, out: Tensor, M: int, F: int):
     k = gpu.kernel("ops.metal", "swiglu")
     gpu.launch(k, (-(-F // 256), M, 1), (256, 1, 1), [x, out], pack("2i", M, F))
+
+
+def im2col(gpu: Gpu, x: Tensor, col: Tensor, *, N: int, H: int, W: int, C: int, KH: int, KW: int, stride: int,
+           pad_t: int, pad_l: int, K: int):
+    """col[N*Ho*Wo][K] <- the (ky, kx, c) taps of each output pixel of an NHWC half image, reflect-padded."""
+    Ho = (H + 2 * pad_t - KH) // stride + 1 if stride == 1 else (H + 1 - KH) // stride + 1
+    Wo = (W + 2 * pad_l - KW) // stride + 1 if stride == 1 else (W + 1 - KW) // stride + 1
+    k = gpu.kernel("ops.metal", "im2col")
+    total = -(-C // 4) * KH * KW * N * Ho * Wo
+    gpu.launch(k, (-(-total // 256), 1, 1), (256, 1, 1), [x, col],
+               pack("12i", N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K))
+    return Ho, Wo
+
+
+def group_norm(gpu: Gpu, x: Tensor, stats: Tensor, w: Tensor, b: Tensor, y: Tensor, *, N: int, HW: int, C: int,
+               G: int = 32, eps: float = 1e-6, silu: bool = True):
+    """y = half(silu?(groupnorm(x))), x float NHWC; stats [N][G][2] float, zeroed by the caller."""
+    ks = gpu.kernel("ops.metal", "gn_stats")
+    for p in (0, 1):
+        gpu.launch(ks, (G, N, -(-HW // 64)), (1, 1, 1), [x, stats], pack("4ifii", N, HW, C, G, eps, int(silu), p))
+    ka = gpu.kernel("ops.metal", "gn_apply")
+    gpu.launch(ka, (-(-C // 256), N * HW, 1), (min(256, C), 1, 1), [x, stats, w, b, y],
+               pack("4ifii", N, HW, C, G, eps, int(silu), 0))
+
+
+def to_half(gpu: Gpu, x: Tensor, y: Tensor, n: int):
+    k = gpu.kernel("ops.metal", "to_half")
+    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, y], pack("i", n))

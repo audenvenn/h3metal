@@ -22,9 +22,4 @@ print(f"vision tower {time.time() - t:.2f}s: embeds rel err {rel(emb, r['vis_emb
 tags = (r["ids"] == 151655).astype(np.int32)
 pos = edit.edit_positions(tags, [tuple(g) for g in r["grid"]])
 print("positions equal:", np.array_equal(pos, r["pos3"]))
-vs = SafeTensors(os.path.join(W, "vae", "diffusion_pytorch_model.safetensors"))
-ew = {k: vs.get(k) for k in vs.keys() if k.startswith(("encoder.", "quant_conv"))}
-enc = edit.VAEEncoder(ew)
-t = time.time()
-mean, std = enc.encode(r["ref_img"])
-print(f"vae encoder {time.time() - t:.2f}s: mean rel err {rel(mean, r['post_mean']):.5f} std rel err {rel(std, r['post_std']):.5f}")
+# The VAE encoder runs on the GPU from the converted file: tests/test_vae_encoder.py.

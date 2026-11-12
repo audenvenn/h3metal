@@ -16,6 +16,7 @@ import os
 import numpy as np
 
 from . import ops
+from .ops import QWeight
 from .gpu import Gpu, Tensor
 from .st import SafeTensors
 from .weights import WeightFile, Writer
@@ -249,3 +250,172 @@ class VAEDecoder:
 def to_uint8(img: np.ndarray) -> np.ndarray:
     """[3][H][W] in [0, 1] -> [H][W][3] uint8, truncating like the released pipeline."""
     return np.clip(img * 255.0, 0, 255).astype(np.uint8).transpose(1, 2, 0)
+
+
+class VAEEncoder:
+    """The VAE encoder on the GPU (edits only): every convolution is an im2col pass plus a half-precision matrix
+    product on the matrix units, GroupNorm + SiLU fused in one pass. The causal 3-D kernels of MiniMax-H3's
+    encoder reduce to their last temporal tap on a single frame."""
+
+    def __init__(self, gpu: Gpu, wf: WeightFile, batch_pixels: int = 1 << 19,
+                 block_out=(128, 256, 256, 512, 512, 1024), spatial_down=(2, 2, 2, 2, 1, 1),
+                 temporal_down=(1, 2, 2, 1, 1, 1), layers_per_block: int = 2):
+        self.gpu = gpu
+        h = wf.host
+        self.batch_pixels = batch_pixels
+
+        def conv(name, fold=None):
+            w = h(name + ".weight").astype(np.float32)
+            b = h(name + ".bias").astype(np.float32)
+            if w.ndim == 5:
+                w = w[:, :, -1]
+            cout, cin, kh, kw = w.shape
+            m = w.transpose(0, 2, 3, 1).reshape(cout, kh * kw * cin)
+            if fold is not None:  # a following 1x1 convolution folded in: W' = Wf W, b' = Wf b + bf
+                wf_, bf_ = fold
+                m, b = wf_ @ m, wf_ @ b + bf_
+                cout = m.shape[0]
+            K = -(-m.shape[1] // 32) * 32
+            N = -(-cout // 128) * 128
+            full = np.zeros((N, K), np.float16)
+            full[:cout, :m.shape[1]] = m
+            bias = np.zeros(N, np.float32)
+            bias[:cout] = b
+            return QWeight("f16", gpu.upload(full), None, N, K, bias=gpu.upload(bias)), kh, cin, cout
+
+        def norm(name):
+            return gpu.upload(h(name + ".weight").astype(np.float32)), gpu.upload(h(name + ".bias").astype(np.float32))
+
+        self.conv_in = conv("encoder.conv_in")
+        self.levels = []
+        cin = block_out[0]
+        for lv, cout in enumerate(block_out):
+            res = []
+            for j in range(layers_per_block):
+                p = f"encoder.down.{lv}.block.{j}"
+                r = {"n1": norm(p + ".norm1"), "c1": conv(p + ".conv1"), "n2": norm(p + ".norm2"),
+                     "c2": conv(p + ".conv2")}
+                if (cin if j == 0 else cout) != cout:
+                    r["sc"] = conv(p + ".nin_shortcut")
+                res.append(r)
+            down = None
+            if spatial_down[lv] * temporal_down[lv] > 1:
+                down = (conv(f"encoder.down.{lv}.downsample.conv"), spatial_down[lv])
+            self.levels.append((res, down))
+            cin = cout
+        self.norm_out = norm("encoder.norm_out")
+        q = h("quant_conv.weight").astype(np.float32).reshape(48, 48)
+        self.conv_out = conv("encoder.conv_out", fold=(q, h("quant_conv.bias").astype(np.float32)))
+        self._ones = {}
+        self._scratch = {}
+
+    def _buf(self, role: str, shape, dtype: str) -> Tensor:
+        """A scratch buffer reused across convolutions and batches (allocating hundreds of MB per convolution
+        leaves the GPU idle while the pages are zeroed)."""
+        import math
+        need = int(math.prod(shape)) * (2 if dtype == "f16" else 4)
+        cur = self._scratch.get(role)
+        if cur is None or cur.buf.nbytes < need:
+            cur = self.gpu.empty((need // (2 if dtype == "f16" else 4),), dtype)
+            self._scratch[role] = cur
+        return Tensor(cur.buf, 0, tuple(shape), dtype)
+
+    def _gate(self, N: int, M: int):
+        key = (N, M)
+        if key not in self._ones:
+            self._ones = {key: (self.gpu.upload(np.ones((1, N), np.float32)), self.gpu.empty((M,), "u8"))}
+        return self._ones[key]
+
+    def _conv(self, xh: Tensor, H: int, W: int, n: int, cw, stride: int = 1, out: Tensor | None = None,
+              accumulate: bool = False, out_role: str = "out"):
+        """3x3 (or 1x1) convolution of a half NHWC batch -> float [n*Ho*Wo][N] (out += ... with accumulate)."""
+        g = self.gpu
+        wt, k, cin, cout = cw
+        if k == 1:
+            col, Ho, Wo = xh, H, W
+        else:
+            if stride == 1:
+                Ho, Wo = H, W
+                pad = 1
+            else:
+                Ho, Wo = (H + 1 - 3) // 2 + 1, (W + 1 - 3) // 2 + 1
+                pad = 0
+            col = self._buf("col", (n * Ho * Wo, wt.K), "f16")
+            ops.im2col(g, xh, col, N=n, H=H, W=W, C=cin, KH=3, KW=3, stride=stride, pad_t=pad, pad_l=pad, K=wt.K)
+        M = n * Ho * Wo
+        if out is None:
+            out = self._buf(out_role, (M, wt.N), "f32")
+        if accumulate:
+            ones, rt = self._gate(wt.N, M)
+            ops.gemm(g, col, wt, out, M, epi=1, rtype=rt, gate=ones)
+        else:
+            ops.gemm(g, col, wt, out, M)
+        return out, Ho, Wo
+
+    def _gn(self, x: Tensor, n: int, HW: int, C: int, nb, stride_c: int, role: str = "gn"):
+        g = self.gpu
+        stats = g.empty((n, 32, 2), "f32")  # small; must start zeroed
+        y = self._buf(role, (n * HW, C), "f16")
+        src = x if stride_c == C else None
+        if src is None:  # a padded product output: compact it first
+            raise ValueError("unexpected padded activation")
+        ops.group_norm(g, src, stats, nb[0], nb[1], y, N=n, HW=HW, C=C)
+        return y
+
+    def encode_tiles(self, tiles: np.ndarray) -> np.ndarray:
+        """tiles [n][H][W][3] normalized pixels (float) -> moments [n][H/16][W/16][48]."""
+        g = self.gpu
+        n, H, W, _ = tiles.shape
+        xh = self._buf("img", (n, H, W, 3), "f16")
+        xh.numpy()[...] = tiles.astype(np.float16)
+        roles = ["xa", "xb"]
+        x, H, W = self._conv(xh, H, W, n, self.conv_in, out_role=roles[0])
+        cur = 0
+        C = self.conv_in[3]
+        for res, down in self.levels:
+            for r in res:
+                cout = r["c1"][3]
+                hn = self._gn(x, n, H * W, C, r["n1"], C, role="gn1")
+                h1, _, _ = self._conv(hn, H, W, n, r["c1"], out_role="h1")
+                h1n = self._gn(h1, n, H * W, cout, r["n2"], cout, role="gn2")
+                if "sc" in r:
+                    xs = self._buf("half", (n * H * W, C), "f16")
+                    ops.to_half(g, x, xs, n * H * W * C)
+                    cur ^= 1
+                    out, _, _ = self._conv(xs, H, W, n, r["sc"], out_role=roles[cur])
+                else:
+                    out = x
+                self._conv(h1n, H, W, n, r["c2"], out=out, accumulate=True)
+                x, C = out, cout
+            if down is not None:
+                cw, s_ = down
+                xs = self._buf("half", (n * H * W, C), "f16")
+                ops.to_half(g, x, xs, n * H * W * C)
+                cur ^= 1
+                x, H, W = self._conv(xs, H, W, n, cw, stride=s_, out_role=roles[cur])
+            g.commit()
+        hn = self._gn(x, n, H * W, C, self.norm_out, C, role="gn1")
+        mom, H, W = self._conv(hn, H, W, n, self.conv_out, out_role="mom")
+        g.wait()
+        return mom.numpy().reshape(n, H, W, -1)[..., :48].copy()
+
+    def encode(self, img: np.ndarray, tile: int = 256, overlap: int = 64):
+        """uint8 [H][W][3] (sides multiples of 16) -> (mean, std) [24][h][w], tiled and blended like the release."""
+        x = (img.astype(np.float32) / 255.0 - PIXEL_MEAN) / PIXEL_STD
+        Hh, Ww = x.shape[:2]
+        ys, yl, yo = split_tiles(Hh, tile, overlap, 16)
+        xs, xl, xo = split_tiles(Ww, tile, overlap, 16)
+        jobs = [(i, j, y, ly, x0, lx) for i, (y, ly) in enumerate(zip(ys, yl)) for j, (x0, lx) in enumerate(zip(xs, xl))]
+        done = {}
+        for shape in sorted({(ly, lx) for _, _, _, ly, _, lx in jobs}):
+            same = [jb for jb in jobs if (jb[3], jb[5]) == shape]
+            per = max(1, self.batch_pixels // (shape[0] * shape[1]))
+            for c in range(0, len(same), per):
+                batch = same[c:c + per]
+                m = self.encode_tiles(np.stack([x[y:y + ly, x0:x0 + lx] for _, _, y, ly, x0, lx in batch]))
+                for k, (i, j, *_r) in enumerate(batch):
+                    done[(i, j)] = m[k].transpose(2, 0, 1)
+        rows = [[done[(i, j)] for j in range(len(xs))] for i in range(len(ys))]
+        mom = stitch(rows, [o // 16 for o in yo], [o // 16 for o in xo])
+        mean, logvar = mom[:24], np.clip(mom[24:], -30.0, 20.0)
+        return mean, np.exp(0.5 * logvar)
