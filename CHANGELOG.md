@@ -8,8 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Z-Image-Turbo (Tongyi-MAI, Apache-2.0), text to image: `h3metal download --model z-image-turbo`, then
-  `h3metal convert` and `h3metal generate --model` on the converted directory (docs/zimage.md). Its
+- Z-Image-Turbo (Tongyi-MAI, Apache-2.0), text to image: `h3metal download --model z-image-turbo`,
+  `h3metal convert ~/.h3metal/z-image-turbo`, then `h3metal generate --model zimage` (docs/zimage.md). Its
   transformer runs on the same int8 products and attention, its Qwen3-4B text encoder on h3metal/te.py.
 - Engine: 3x3 convolutions as matrix products without im2col (kernels/conv.metal: batches, strides, zero
   or reflected borders), the FLUX autoencoder's decoder (h3metal/flux_vae.py), a fused normalized-and-gated
