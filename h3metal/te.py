@@ -41,7 +41,8 @@ def convert_te(src: str, out: str, *, fmt: str = "h8", layers: int = N_LAYERS, s
                        "mrope_section": rope.get("mrope_section", [24, 20, 20]),
                        "vocab": tc["vocab_size"], "image_token_id": full.get("image_token_id", 151655)}}
     w = Writer(out, meta)
-    emb = st.raw(f"{prefix}.embed_tokens.weight")
+    name = f"{prefix}.embed_tokens.weight"
+    emb = st.raw(name) if st.dtype(name) == "BF16" else bf16_bits(st.get(name))  # stored as bfloat16 bits
     w.tensor("embed", np.ascontiguousarray(emb), "bf16", host_only=True)
     rep = Hq // Hkv
     for l in range(layers):
