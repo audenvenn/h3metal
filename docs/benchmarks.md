@@ -43,8 +43,24 @@ TBD
 
 ## Kernels
 
-`bench/gemm_bench.py`, `bench/attn_bench.py` and `bench/dit_layer_bench.py`
-time the transformer's matrix products, its attention and a whole block
-with random weights.
+`bench/hw/mma_rate.py` measures the matrix units on register fragments,
+the ceiling everything else is compared with:
 
-TBD
+| Operands | Rate |
+|---|---:|
+| int8 x int8 -> int32 | 42.0 TOPS |
+| half x half -> float | 20.6 TFLOPS |
+| half x half -> half | 20.3 TFLOPS |
+| bfloat x bfloat -> float | 20.7 TFLOPS |
+
+Half-precision accumulation is no faster than float accumulation, which is
+why P V in attention keeps float accumulators.
+
+`bench/gemm_bench.py`, `bench/attn_bench.py` and `bench/dit_layer_bench.py`
+time the transformer's products, its attention and a whole block with
+random int8 weights. Tile shapes and splits were chosen with interleaved
+A/B runs on a warm GPU (a long generation runs warm, and a quick sweep on a
+cool GPU ranks them differently).
+
+TBD: the block profiles at 2048 x 2048 and 4096 x 4096 with the final
+kernels.
