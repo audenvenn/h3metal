@@ -210,15 +210,18 @@ class VAEEncoder:
     tap. weights: the checkpoint's encoder.* / quant_conv.* tensors."""
 
     def __init__(self, weights: dict, block_out=(128, 256, 256, 512, 512, 1024), layers_per_block: int = 2,
-                 spatial_down=(2, 2, 2, 2, 1, 1), temporal_down=(1, 2, 2, 1, 1, 1)):
+                 spatial_down=(2, 2, 2, 2, 1, 1), temporal_down=(1, 2, 2, 1, 1, 1), half: bool = True):
+        """half: convolutions in float16 (norm statistics and residual sums stay float32)."""
         import mlx.core as mx
         self.mx = mx
+        self.cdt = mx.float16 if half else mx.float32
 
         def conv(name, temporal=True):
             w = weights[name + ".weight"]
             if w.ndim == 5:
                 w = w[:, :, -1]                       # last temporal tap
-            return mx.array(np.ascontiguousarray(w.transpose(0, 2, 3, 1))), mx.array(weights[name + ".bias"])
+            return (mx.array(np.ascontiguousarray(w.transpose(0, 2, 3, 1))).astype(self.cdt),
+                    mx.array(weights[name + ".bias"]))
         self.conv_in = conv("encoder.conv_in")
         self.levels = []
         cin = block_out[0]
@@ -245,12 +248,12 @@ class VAEEncoder:
 
     def _gn(self, x, nb, groups=32, eps=1e-6):
         mx = self.mx
-        Hh, Ww, C = x.shape[1:]
-        g = x.reshape(1, Hh * Ww, groups, C // groups)
+        N, Hh, Ww, C = x.shape
+        g = x.reshape(N, Hh * Ww, groups, C // groups)
         mean = g.mean(axis=(1, 3), keepdims=True)
         var = ((g - mean) ** 2).mean(axis=(1, 3), keepdims=True)
         g = (g - mean) * mx.rsqrt(var + eps)
-        return g.reshape(1, Hh, Ww, C) * nb[0] + nb[1]
+        return g.reshape(N, Hh, Ww, C) * nb[0] + nb[1]
 
     def _reflect(self, x, top, bottom, left, right):
         mx = self.mx
@@ -276,20 +279,20 @@ class VAEEncoder:
         mx = self.mx
         if pad:
             x = self._reflect(x, 1, 1, 1, 1)
-        return mx.conv2d(x, wb[0], stride=stride) + wb[1]
+        return mx.conv2d(x.astype(self.cdt), wb[0], stride=stride).astype(mx.float32) + wb[1]
 
     def _silu(self, x):
         return x * self.mx.sigmoid(x)
 
     def encode_tile(self, x):
-        """x: [1][H][W][3] normalized pixels -> moments [1][h][w][48]."""
+        """x: [N][H][W][3] normalized pixels -> moments [N][h][w][48]."""
         mx = self.mx
         x = self._conv3(x, self.conv_in)
         for res, down in self.levels:
             for r in res:
                 h = self._conv3(self._silu(self._gn(x, r["n1"])), r["c1"])
                 h = self._conv3(self._silu(self._gn(h, r["n2"])), r["c2"])
-                sc = x if "sc" not in r else mx.conv2d(x, r["sc"][0]) + r["sc"][1]
+                sc = x if "sc" not in r else mx.conv2d(x.astype(self.cdt), r["sc"][0]).astype(mx.float32) + r["sc"][1]
                 x = sc + h
             if down is not None:
                 wb, s = down
@@ -310,13 +313,18 @@ class VAEEncoder:
         H, W = x.shape[:2]
         ys, yl, yo = split_tiles(H, tile, overlap, 16)
         xs, xl, xo = split_tiles(W, tile, overlap, 16)
-        rows = []
-        for y, ly in zip(ys, yl):
-            row = []
-            for x0, lx in zip(xs, xl):
-                m = self.encode_tile(mx.array(x[None, y:y + ly, x0:x0 + lx]))
-                row.append(np.array(m[0]).transpose(2, 0, 1))
-            rows.append(row)
+        # Tiles of one size run as a batch (16 at a time) through the same convolutions.
+        jobs = [(i, j, y, ly, x0, lx) for i, (y, ly) in enumerate(zip(ys, yl)) for j, (x0, lx) in enumerate(zip(xs, xl))]
+        done = {}
+        for shape in sorted({(ly, lx) for _, _, _, ly, _, lx in jobs}):
+            same = [jb for jb in jobs if (jb[3], jb[5]) == shape]
+            for c in range(0, len(same), 16):
+                batch = same[c:c + 16]
+                xb = np.stack([x[y:y + ly, x0:x0 + lx] for _, _, y, ly, x0, lx in batch])
+                m = np.array(self.encode_tile(mx.array(xb)))
+                for k, (i, j, *_r) in enumerate(batch):
+                    done[(i, j)] = m[k].transpose(2, 0, 1)
+        rows = [[done[(i, j)] for j in range(len(xs))] for i in range(len(ys))]
         mom = stitch(rows, [o // 16 for o in yo], [o // 16 for o in xo])
         mean, logvar = mom[:24], np.clip(mom[24:], -30.0, 20.0)
         return mean, np.exp(0.5 * logvar)
