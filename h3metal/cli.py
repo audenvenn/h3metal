@@ -86,6 +86,10 @@ def cmd_convert(a):
         fmts = dict(zip(("qkv", "out", "fc1", "fc2"), a.dit.split(","))) if "," in a.dit else \
             {k: a.dit for k in ("qkv", "out", "fc1", "fc2")}
         convert_dit(src, os.path.join(a.out, "dit.h3m"), fmts=fmts)
+    if a.gptq:
+        from .calib import calibrate_model
+        fmts = dict(zip(("qkv", "out", "fc1", "fc2"), a.dit.split(","))) if "," in a.dit else a.dit
+        calibrate_model(src, a.out, fmts)
 
 
 def cmd_download(a):
@@ -134,6 +138,8 @@ def main(argv=None):
     c.add_argument("--te", default="q8", help="text encoder weights: q8, q4g or f16")
     c.add_argument("--vae", default="f16")
     c.add_argument("--only", help="comma-separated subset of vae,vision,te,dit,tokenizer")
+    c.add_argument("--gptq", action="store_true",
+                   help="choose the transformer's codes with GPTQ on calibration runs (about an hour on an M6)")
     c.set_defaults(func=cmd_convert)
     d = sub.add_parser("download", help="fetch the official weights h3metal converts from (about 125 GB)")
     d.add_argument("dest", nargs="?", default=os.path.expanduser("~/.h3metal/checkpoint"))

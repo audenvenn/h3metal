@@ -114,6 +114,44 @@ def trajectory(ref: dict, sigmas) -> list[np.ndarray]:
     return out
 
 
+# Calibration prompts for `h3metal convert --gptq`: photography, product, illustration and text-heavy design.
+CALIB_PROMPTS = [
+    "A busy street market in Marrakech at golden hour, crowds of people, spice stalls with colorful pyramids of "
+    "spices, hanging brass lanterns, cinematic photograph.",
+    "Minimalist product photo of a white ceramic coffee cup with a thin gold rim on a pale oak table, soft diffused "
+    "studio light, subtle shadow, plain beige background.",
+    "Anime-style illustration of a girl with a red umbrella standing in the rain in a narrow neon-lit Tokyo alley at "
+    "night, reflections in puddles, detailed background.",
+    "A clean educational infographic poster titled \"THE WATER CYCLE\" with labeled arrows for evaporation, "
+    "condensation, precipitation and collection, clouds, rain, mountains, a river and the sea, flat vector style.",
+]
+
+
+def calibrate_model(src: str, model_dir: str, fmt, size: int = 2048, log=print):
+    """GPTQ for a converted model directory: records calibration runs (CALIB_PROMPTS, size x size) with the
+    directory's own text encoder and transformer, then rewrites the transformer's blocks with GPTQ codes in
+    `fmt`. Needs the original checkpoint `src`."""
+    import shutil
+    import tempfile
+    from .pipeline import Pipeline, Timing
+    pipe = Pipeline(model_dir, log=lambda *a: None)
+    dit = pipe.paths["dit"]
+    tmp = tempfile.mkdtemp(prefix="gptq-", dir=model_dir)
+    try:
+        runs = []
+        for i, prompt in enumerate(CALIB_PROMPTS):
+            emb = pipe.encode_prompt(prompt, Timing())
+            pipe.release()
+            runs.append(os.path.join(tmp, f"run{i}.npz"))
+            record_run(dit, emb, (size, size), i, runs[-1])
+            log(f"calibration run {i + 1}/{len(CALIB_PROMPTS)} recorded")
+        del pipe
+        calibrate(src, dit, dit + ".gptq", runs, fmt=fmt, log=log)
+        os.replace(dit + ".gptq", dit)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def record_run(dit_path: str, emb: np.ndarray, canvas, seed: int, out: str):
     """A calibration run made with the engine itself (any converted DiT, int8 in practice): the text embeddings,
     the starting noise and every step's velocity, in the format reference runs are saved in (what calibrate()
