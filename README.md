@@ -22,7 +22,9 @@ quarters of what the GPU's matrix units can do at their measured peak. See
 
 Needs a Mac with Apple silicon and Metal 4 (macOS 26 or later), Python 3.10+
 and the Xcode command line tools (pip fetches CMake and Ninja to build the
-GPU runtime). The matrix units h3metal is built for are in M5- and M6-class
+GPU runtime). The `python3` that comes with macOS is 3.9 and its pip rejects
+the command below with "Invalid requirement": use a newer Python, from
+python.org, Homebrew or uv. The matrix units h3metal is built for are in M5- and M6-class
 GPUs; it is developed and measured on an M6.
 
 ```sh
