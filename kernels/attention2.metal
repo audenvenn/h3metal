@@ -26,6 +26,9 @@ using namespace metal;
 #ifndef QR
 #define QR 2
 #endif
+#ifndef PVH
+#define PVH 0  // 1: each block's P V accumulates in half (32 terms, P <= 1), then adds into the float output
+#endif
 
 #define BQ (16 * QR * WM)
 #define DF (HD / 16)
@@ -168,6 +171,36 @@ kernel void attention_q8(device const int8_t *Q [[buffer(0)]],
       }
     }
     // P V: each value fragment pair feeds every query fragment.
+#if PVH
+    nax::frag<half> ph[QR][KF];
+#pragma clang loop unroll(full)
+    for (short r = 0; r < QR; r++) {
+#pragma clang loop unroll(full)
+      for (short j = 0; j < KF; j++) ph[r][j] = nax::frag<half>(s[r][j]);
+    }
+#pragma clang loop unroll(full)
+    for (short d = 0; d < DF; d += 2) {
+      nax::frag<half> acc0[QR], acc1[QR];
+#pragma clang loop unroll(full)
+      for (short r = 0; r < QR; r++) {
+        acc0[r] = half(0.0f);
+        acc1[r] = half(0.0f);
+      }
+#pragma clang loop unroll(full)
+      for (short j = 0; j < KF; j++) {
+        nax::frag<half> v0, v1;
+        nax::load_tg(v0, vs + (j * 16) * LDK + d * 16, LDK, sc);
+        nax::load_tg(v1, vs + (j * 16) * LDK + d * 16 + 16, LDK, sc);
+#pragma clang loop unroll(full)
+        for (short r = 0; r < QR; r++) nax::mma<half, half, half, false, false>(acc0[r], acc1[r], ph[r][j], v0, v1);
+      }
+#pragma clang loop unroll(full)
+      for (short r = 0; r < QR; r++) {
+        o[r][d] += nax::frag<float>(acc0[r]);
+        o[r][d + 1] += nax::frag<float>(acc1[r]);
+      }
+    }
+#else
 #pragma clang loop unroll(full)
     for (short j = 0; j < KF; j++) {
       nax::frag<half> ph[QR];
@@ -182,6 +215,7 @@ kernel void attention_q8(device const int8_t *Q [[buffer(0)]],
         for (short r = 0; r < QR; r++) nax::mma<float, half, half, false, false>(o[r][d], o[r][d + 1], ph[r], v0, v1);
       }
     }
+#endif
   }
   if (!active) return;
   const int seq = h / p.seq_heads;

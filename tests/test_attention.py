@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
 
 
-def check_q8v2(Lq, L, H, KVH, D, wm=8, qr=2, bk=32, seed=0):
+def check_q8v2(Lq, L, H, KVH, D, wm=8, qr=2, bk=32, seed=0, **variant):
     """kernels/attention2.metal against the float reference of the dequantized int8 queries and keys."""
     rng = np.random.default_rng(seed)
     gpu = Gpu()
@@ -79,12 +79,12 @@ def check_q8v2(Lq, L, H, KVH, D, wm=8, qr=2, bk=32, seed=0):
     KS = gpu.empty((KVH, k_rows), "f32"); KS.numpy()[:, :L] = ks
     O = gpu.empty((q_rows, H * D), "f16")
     attention_q8(gpu, Q, K, Vt, O, Lq=Lq, L=L, H=H, KVH=KVH, D=D, q_rows=q_rows, k_rows=k_rows, scale=D ** -0.5,
-                 q_scale=QS, k_scale=KS, wm=wm, qr=qr, bk=bk)
+                 q_scale=QS, k_scale=KS, wm=wm, qr=qr, bk=bk, **variant)
     gpu.wait()
     got = O.numpy()[:Lq].astype(np.float64)
     ref = ref_attn(qi * qs[..., None], ki * ks[..., None], v, D ** -0.5)
     err = np.abs(got - ref).max()
-    print(f"q8v2 qr={qr} wm={wm} bk={bk} Lq={Lq} L={L} H={H} KVH={KVH} D={D}: max abs err {err:.2e}")
+    print(f"q8v2 qr={qr} wm={wm} bk={bk} {variant} Lq={Lq} L={L} H={H} KVH={KVH} D={D}: max abs err {err:.2e}")
     assert err < 5e-3
 
 
@@ -132,4 +132,6 @@ if __name__ == "__main__":
         check_q8v2(130, 130, 8, 2, 128, qr=qr, wm=4)
         check_q8v2(64, 64, 4, 4, 64, qr=qr)
         check_q8v2(1000, 1037, 2, 2, 96, qr=qr, bk=64)
+        check_q8v2(300, 1037, 3, 3, 128, qr=qr, PVH=1)
+        check_q8v2(1000, 4096, 2, 2, 128, qr=qr, bk=64, PVH=1)
     print("ok q8v2")
