@@ -93,21 +93,29 @@ static inline float tg_max(float v, threadgroup float *tmp, ushort sg, ushort la
 #define HDIM 128
 #endif
 
+#ifndef POST
+#define POST 0
+#endif
+
 // a[m] = int8(rot(rmsnorm(x[m]) * scale'[type] + shift[type])), one threadgroup per row.
 // mod: [types][2][D] floats per row type: scale' (the norm weight times 1 + scale) and shift.
 // With OUT_F, writes the modulated row as floats instead (no rotation, no quantization).
-kernel void norm_mod_q8(device const float *x [[buffer(0)]],
+// With POST, first x[m] += post * rmsnorm(y[m]) (written back): the previous product's normalized, gated output
+// joins the residual stream in the same pass (post_norm_add below, fused).
+kernel void norm_mod_q8(device float *x [[buffer(0)]],
                         device const float *mod [[buffer(1)]],
                         device const uchar *rtype [[buffer(2)]],
                         device void *out [[buffer(3)]],
                         device float *sa [[buffer(4)]],
                         constant NormQParams &p [[buffer(5)]],
+                        device const float *y [[buffer(6)]],
+                        device const float *post [[buffer(7)]],
                         uint m [[threadgroup_position_in_grid]],
                         ushort sg [[simdgroup_index_in_threadgroup]],
                         ushort lane [[thread_index_in_simdgroup]])
 {
   threadgroup float tmp[NSG];
-  const device float *row = x + size_t(m) * p.x_stride;
+  device float *row = x + size_t(m) * p.x_stride;
   const int nb = p.D / RB;
 
   float v[MAXB][8];
@@ -120,10 +128,48 @@ kernel void norm_mod_q8(device const float *x [[buffer(0)]],
       const float4 a = src[0], c = src[1];
       v[b][0] = a.x; v[b][1] = a.y; v[b][2] = a.z; v[b][3] = a.w;
       v[b][4] = c.x; v[b][5] = c.y; v[b][6] = c.z; v[b][7] = c.w;
+#if !POST
 #pragma clang loop unroll(full)
       for (int i = 0; i < 8; i++) ss += v[b][i] * v[b][i];
+#endif
     }
   }
+#if POST
+  {
+    float yv[MAXB][8];
+    float ssy = 0;
+#pragma clang loop unroll(full)
+    for (int b = 0; b < MAXB; b++) {
+      const int blk = sg + b * NSG;
+      if (blk < nb) {
+        const device float4 *src = (const device float4 *)(y + size_t(m) * p.D + blk * RB + lane * 8);
+        const float4 a = src[0], c = src[1];
+        yv[b][0] = a.x; yv[b][1] = a.y; yv[b][2] = a.z; yv[b][3] = a.w;
+        yv[b][4] = c.x; yv[b][5] = c.y; yv[b][6] = c.z; yv[b][7] = c.w;
+#pragma clang loop unroll(full)
+        for (int i = 0; i < 8; i++) ssy += yv[b][i] * yv[b][i];
+      }
+    }
+    const float iy = rsqrt(tg_sum<NSG>(ssy, tmp, sg, lane) / float(p.D) + p.eps);
+#pragma clang loop unroll(full)
+    for (int b = 0; b < MAXB; b++) {
+      const int blk = sg + b * NSG;
+      if (blk < nb) {
+        const device float4 *w = (const device float4 *)(post + blk * RB + lane * 8);
+        const float4 w0 = w[0], w1 = w[1];
+        const float pw[8] = {w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w};
+#pragma clang loop unroll(full)
+        for (int i = 0; i < 8; i++) {
+          v[b][i] += pw[i] * yv[b][i] * iy;
+          ss += v[b][i] * v[b][i];
+        }
+        device float4 *dst = (device float4 *)(row + blk * RB + lane * 8);
+        dst[0] = float4(v[b][0], v[b][1], v[b][2], v[b][3]);
+        dst[1] = float4(v[b][4], v[b][5], v[b][6], v[b][7]);
+      }
+    }
+  }
+#endif
   const float inv = rsqrt(tg_sum<NSG>(ss, tmp, sg, lane) / float(p.D) + p.eps);
   const device float *md = mod + size_t(rtype[m]) * p.mod_stride;
 

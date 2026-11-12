@@ -49,8 +49,8 @@ b = dit._bufs
 b["x"].numpy()[:S] = rng.standard_normal((S, D)).astype(np.float32)
 
 
-def run():
-    dit._block(b, blk, b["x"], 0, S, 0)
+def run():  # one block, its last update fused into the next block's first norm as in a real step
+    dit._block(b, blk, b["x"], 0, S, 0, blk["post_mlp"].view((D,)))
 
 
 run()

@@ -220,8 +220,11 @@ class ZImageDiT:
     def free(self):
         self._bufs = None
 
-    def _block(self, b, blk, x: Tensor, r0: int, S: int, s: int):
-        """One block over rows r0 .. r0 + S of x (the rotary tables' rows r0 .. too); s: the step's table row."""
+    def _block(self, b, blk, x: Tensor, r0: int, S: int, s: int, pending: Tensor | None = None) -> Tensor:
+        """One block over rows r0 .. r0 + S of x (the rotary tables' rows r0 .. too); s: the step's table row.
+
+        A block's last update, x += post_mlp * rmsnorm(y), is left to the caller (returned): the next block adds it
+        in the same pass as its first norm (pending), or _flush() adds it on its own."""
         g, D, H, hd, F = self.gpu, self.D, self.H, self.hd, self.F
         Sp = b["Sp"]
         eps = self.cfg["norm_eps"]
@@ -231,7 +234,8 @@ class ZImageDiT:
         pre_m = blk["pre_mlp"].view((1, 2, D), offset_elems=min(s, blk["pre_mlp"].shape[0] - 1) * 2 * D)
         post_a = blk["post_attn"].view((D,), offset_elems=min(s, blk["post_attn"].shape[0] - 1) * D)
         post_m = blk["post_mlp"].view((D,), offset_elems=min(s, blk["post_mlp"].shape[0] - 1) * D)
-        ops.norm_mod_q8(g, xr, pre_a, b["rt"], a8.view((Sp, D)), sa, S, D, eps=eps)
+        fused = {"y": y, "post": pending} if pending is not None else {}
+        ops.norm_mod_q8(g, xr, pre_a, b["rt"], a8.view((Sp, D)), sa, S, D, eps=eps, **fused)
         qkv = b["wide"].view((Sp, 3 * D))
         ops.gemm(g, a8.view((Sp, D)), blk["qkv"], qkv, S, sa=sa, **_ztile(blk["qkv"], S))
         Qb, Kb = b["Q"], b["K"]
@@ -242,13 +246,16 @@ class ZImageDiT:
                       scale=hd ** -0.5, q_scale=b["qs"], k_scale=b["ks"], **self.attn_cfg_q8)
         ops.rot_q8(g, b["o"], a8.view((Sp, D)), sa, S, D)
         ops.gemm(g, a8.view((Sp, D)), blk["out"], y, S, sa=sa, **_ztile(blk["out"], S))
-        ops.post_norm_add(g, xr, y, post_a, S, D, eps=eps)
-        ops.norm_mod_q8(g, xr, pre_m, b["rt"], a8.view((Sp, D)), sa, S, D, eps=eps)
+        ops.norm_mod_q8(g, xr, pre_m, b["rt"], a8.view((Sp, D)), sa, S, D, eps=eps, y=y, post=post_a)
         h = b["wide"].view((Sp, 2 * F))
         ops.gemm(g, a8.view((Sp, D)), blk["fc1"], h, S, sa=sa, **_ztile(blk["fc1"], S))
         ops.rot_q8(g, h, a8.view((Sp, F)), sa, S, F, swiglu=True)
         ops.gemm(g, a8.view((Sp, F)), blk["fc2"], y, S, sa=sa, **_ztile(blk["fc2"], S))
-        ops.post_norm_add(g, xr, y, post_m, S, D, eps=eps)
+        return post_m
+
+    def _flush(self, b, x: Tensor, r0: int, S: int, pending: Tensor | None):
+        if pending is not None:
+            ops.post_norm_add(self.gpu, x.row(r0, S), b["y"], pending, S, self.D, eps=self.cfg["norm_eps"])
 
     def prepare(self, n_cap: int, lat_h: int, lat_w: int):
         """Per-request layout: [image rows, padded to 32][caption rows, padded to 32] and their rotary tables."""
@@ -283,8 +290,10 @@ class ZImageDiT:
         rows[T:] = self.cap_pad
         x = b["x"]
         x.numpy()[self.n_x:self.n_x + self.n_c] = rows
+        pending = None
         for blk in self.cap_refiner:
-            self._block(b, blk, x, self.n_x, self.n_c, 0)
+            pending = self._block(b, blk, x, self.n_x, self.n_c, 0, pending)
+        self._flush(b, x, self.n_x, self.n_c, pending)
         g.wait()
         b["cap"].numpy()[:self.n_c] = x.numpy()[self.n_x:self.n_x + self.n_c]
 
@@ -299,11 +308,15 @@ class ZImageDiT:
         xn = x.numpy()
         xn[self.n_img:self.n_x] = self.x_pad
         xn[self.n_x:self.n_x + self.n_c] = b["cap"].numpy()[:self.n_c]
+        pending = None
         for blk in self.x_refiner:
-            self._block(b, blk, x, 0, self.n_x, s)
+            pending = self._block(b, blk, x, 0, self.n_x, s, pending)
+        self._flush(b, x, 0, self.n_x, pending)  # the main blocks run over more rows
+        pending = None
         for blk in self.blocks:
-            self._block(b, blk, x, 0, self.S, s)
+            pending = self._block(b, blk, x, 0, self.S, s, pending)
             g.commit()
+        self._flush(b, x, 0, self.S, pending)
         y = b["y"]
         fs = self.final_scale.view((D,), offset_elems=s * D)
         ops.layer_norm(g, x, fs, self.zeros, y, self.n_img, D, eps=1e-6)

@@ -100,14 +100,15 @@ def _rows_kernel_cfg(D: int):
 
 def norm_mod_q8(gpu: Gpu, x: Tensor, mod: Tensor, rtype: Tensor, out: Tensor, sa: Tensor | None, M: int, D: int,
                 *, eps: float, mod_stride: int | None = None, x_stride: int | None = None, out_f: bool = False,
-                out_h: bool = False, out_hr: bool = False):
+                out_h: bool = False, out_hr: bool = False, y: Tensor | None = None, post: Tensor | None = None):
     """out = int8(rot(rmsnorm(x) * mod[type][0] + mod[type][1])) and its row scales (or the plain modulated
-    row as float with out_f, as half with out_h)."""
+    row as float with out_f, as half with out_h). With y and post, first x += post * rmsnorm(y) (post_norm_add
+    fused; same eps)."""
     nsg, maxb = _rows_kernel_cfg(D)
     k = gpu.kernel("ops.metal", "norm_mod_q8", NSG=nsg, MAXB=maxb, OUT_F=int(out_f), OUT_H=int(out_h),
-                   OUT_HR=int(out_hr))
+                   OUT_HR=int(out_hr), POST=int(post is not None))
     params = pack("4if", M, D, x_stride or D, mod_stride or 2 * D, eps)
-    gpu.launch(k, (M, 1, 1), (32 * nsg, 1, 1), [x, mod, rtype, out, sa], params)
+    gpu.launch(k, (M, 1, 1), (32 * nsg, 1, 1), [x, mod, rtype, out, sa, None, y, post], params, params_index=5)
 
 
 def rot_q8(gpu: Gpu, x: Tensor, out: Tensor, sa: Tensor | None, M: int, D: int, *, swiglu: bool = False,
