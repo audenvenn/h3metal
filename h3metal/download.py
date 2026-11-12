@@ -26,6 +26,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 REPOS = {"huggingface": "MiniMaxAI/MiniMax-H3-Image", "modelscope": "MiniMax/MiniMax-H3-Image"}
+# Other models h3metal runs: their repositories, all files needed.
+OTHER = {"z-image-turbo": {"huggingface": "Tongyi-MAI/Z-Image-Turbo", "modelscope": "Tongyi-MAI/Z-Image-Turbo"}}
 UA = {"User-Agent": "h3metal-download"}
 N_LAYERS = 50
 
@@ -42,9 +44,9 @@ def _json(url: str):
         return json.loads(r.read())
 
 
-def list_files(source: str):
+def list_files(source: str, repo: str | None = None):
     """[(path, size, sha256 or None, url)] of the whole repository."""
-    repo = REPOS[source]
+    repo = repo or REPOS[source]
     out = []
     if source == "modelscope":
         d = _json(f"https://www.modelscope.cn/api/v1/models/{repo}/repo/files?Revision=master&Recursive=true")
@@ -112,17 +114,21 @@ def _fetch(item, dest: str) -> tuple[str, bool, str]:
     return path, True, "ok"
 
 
-def download(dest: str, source: str = "huggingface", jobs: int = 4, log=print) -> bool:
-    files = list_files(source)
-    idx_item = [f for f in files if f[0] == "text_encoder/model.safetensors.index.json"]
-    index = None
-    if idx_item:
-        _fetch(idx_item[0], dest)
-        with open(os.path.join(dest, idx_item[0][0])) as f:
-            index = json.load(f)
-    todo = needed(files, index)
+def download(dest: str, source: str = "huggingface", jobs: int = 4, log=print, model: str = "minimax-h3") -> bool:
+    repo = OTHER[model][source] if model in OTHER else REPOS[source]
+    files = list_files(source, repo)
+    if model in OTHER:
+        todo = sorted(files, key=lambda f: f[1])
+    else:
+        idx_item = [f for f in files if f[0] == "text_encoder/model.safetensors.index.json"]
+        index = None
+        if idx_item:
+            _fetch(idx_item[0], dest)
+            with open(os.path.join(dest, idx_item[0][0])) as f:
+                index = json.load(f)
+        todo = needed(files, index)
     total = sum(f[1] for f in todo)
-    log(f"{REPOS[source]} [{source}] -> {dest}: {len(todo)} files, {total / 1e9:.1f} GB")
+    log(f"{repo} [{source}] -> {dest}: {len(todo)} files, {total / 1e9:.1f} GB")
     t0, ok = time.time(), True
     with ThreadPoolExecutor(jobs) as ex:
         for path, good, msg in ex.map(lambda it: _fetch(it, dest), todo):

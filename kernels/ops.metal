@@ -416,10 +416,14 @@ kernel void copy4(device const float4 *src [[buffer(0)]],
 // LayerNorm with affine weight and bias over D channels -> half; one threadgroup per row.
 struct LnParams { int M, D, x_stride; float eps; };
 
+#ifndef LN_OUT_T
+#define LN_OUT_T half
+#endif
+
 kernel void layer_norm(device const float *x [[buffer(0)]],
                        device const float *w [[buffer(1)]],
                        device const float *b [[buffer(2)]],
-                       device half *out [[buffer(3)]],
+                       device LN_OUT_T *out [[buffer(3)]],
                        constant LnParams &p [[buffer(4)]],
                        uint m [[threadgroup_position_in_grid]],
                        ushort sg [[simdgroup_index_in_threadgroup]],
@@ -434,8 +438,8 @@ kernel void layer_norm(device const float *x [[buffer(0)]],
   float v = 0;
   for (int c = tid; c < p.D; c += NSG * 32) { const float d = row[c] - mean; v += d * d; }
   const float inv = rsqrt(tg_sum<NSG>(v, tmp, sg, lane) / float(p.D) + p.eps);
-  device half *o = out + size_t(m) * p.D;
-  for (int c = tid; c < p.D; c += NSG * 32) o[c] = half((row[c] - mean) * inv * w[c] + b[c]);
+  device LN_OUT_T *o = out + size_t(m) * p.D;
+  for (int c = tid; c < p.D; c += NSG * 32) o[c] = LN_OUT_T((row[c] - mean) * inv * w[c] + b[c]);
 }
 
 // out[m][j] = value * silu(gate), in[m] = [values (F) | gates (F)], half -> half.
@@ -453,13 +457,22 @@ kernel void swiglu(device const half *in [[buffer(0)]],
   out[size_t(m) * p.F + j] = half(float(row[j]) * g / (1.0f + exp(-g)));
 }
 
-// ---- Convolutions as matrix products (the VAE encoder) ----------------------
+// ---- Convolutions as matrix products (the VAE encoder, the FLUX decoder) ---
 // Activations are NHWC. im2col writes, for every output pixel of a 3x3 (or
 // 1x1) convolution, the KH*KW*C input values it reads, in (ky, kx, c) order,
 // padded with zeros to K columns. Out-of-image taps read the reflection of
-// the image (no edge repeat); pad_t/pad_l give the padding before the first
-// row/column, the bottom/right side is whatever the stride leaves.
-struct Im2colParams { int N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K; };
+// the image (no edge repeat), or zeros with ZPAD; pad_t/pad_l give the
+// padding before the first row/column, the bottom/right side is whatever the
+// stride leaves. With UP2 the convolution's input is the source image
+// upsampled 2x by nearest neighbour (H, W are the upsampled sides), read
+// straight from the source. Output rows start at row0 (a stripe of Ho rows).
+#ifndef ZPAD
+#define ZPAD 0
+#endif
+#ifndef UP2
+#define UP2 0
+#endif
+struct Im2colParams { int N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K, row0; };
 
 static inline int reflect(int i, int n) {
   if (i < 0) i = -i;
@@ -479,11 +492,24 @@ kernel void im2col(device const half *x [[buffer(0)]],
   const int pix = int(gid) / (C4 * taps);
   if (pix >= p.N * p.Ho * p.Wo) return;
   const int n = pix / (p.Ho * p.Wo), r = pix % (p.Ho * p.Wo);
-  const int oy = r / p.Wo, ox = r % p.Wo;
+  const int oy = r / p.Wo + p.row0, ox = r % p.Wo;
   const int ky = tap / p.KW, kx = tap % p.KW;
-  const int iy = reflect(oy * p.stride + ky - p.pad_t, p.H), ix = reflect(ox * p.stride + kx - p.pad_l, p.W);
-  const device half *src = x + ((size_t(n) * p.H + iy) * p.W + ix) * p.C + c4;
+  int iy = oy * p.stride + ky - p.pad_t, ix = ox * p.stride + kx - p.pad_l;
   device half *dst = col + size_t(pix) * p.K + tap * p.C + c4;
+#if ZPAD
+  if (iy < 0 || iy >= p.H || ix < 0 || ix >= p.W) {
+    for (int i = 0; i < 4 && c4 + i < p.C; i++) dst[i] = 0;
+    return;
+  }
+#else
+  iy = reflect(iy, p.H);
+  ix = reflect(ix, p.W);
+#endif
+#if UP2
+  const device half *src = x + ((size_t(n) * (p.H / 2) + iy / 2) * (p.W / 2) + ix / 2) * p.C + c4;
+#else
+  const device half *src = x + ((size_t(n) * p.H + iy) * p.W + ix) * p.C + c4;
+#endif
   if ((p.C & 3) == 0) {
     *(device half4 *)dst = *(const device half4 *)src;
   } else {
@@ -599,4 +625,74 @@ kernel void gelu(device const float *x [[buffer(0)]],
   const float g = p.exact ? 0.5f * v * (1.0f + erf_approx(v * 0.70710678f))
                           : 0.5f * v * (1.0f + precise::tanh(0.7978845608f * (v + 0.044715f * v * v * v)));
   y[i] = half(g);
+}
+
+// x[m] += post * rmsnorm(y[m]): a product's output normalized (RMS over the row), scaled per channel and
+// added to the residual stream (Z-Image normalizes every block's attention and MLP output this way, with
+// post = the norm weight times the step's tanh gate). One threadgroup per row; post: [D] floats.
+kernel void post_norm_add(device float *x [[buffer(0)]],
+                          device const float *y [[buffer(1)]],
+                          device const float *post [[buffer(2)]],
+                          constant NormQParams &p [[buffer(3)]],
+                          uint m [[threadgroup_position_in_grid]],
+                          ushort sg [[simdgroup_index_in_threadgroup]],
+                          ushort lane [[thread_index_in_simdgroup]])
+{
+  threadgroup float tmp[NSG];
+  const device float *row = y + size_t(m) * p.D;
+  device float *xr = x + size_t(m) * p.x_stride;
+  const int nb = p.D / RB;
+  float4 v[MAXB][2];
+  float ss = 0;
+#pragma clang loop unroll(full)
+  for (int b = 0; b < MAXB; b++) {
+    const int blk = sg + b * NSG;
+    if (blk < nb) {
+      const device float4 *src = (const device float4 *)(row + blk * RB + lane * 8);
+      v[b][0] = src[0];
+      v[b][1] = src[1];
+      ss += dot(v[b][0], v[b][0]) + dot(v[b][1], v[b][1]);
+    }
+  }
+  const float inv = rsqrt(tg_sum<NSG>(ss, tmp, sg, lane) / float(p.D) + p.eps);
+#pragma clang loop unroll(full)
+  for (int b = 0; b < MAXB; b++) {
+    const int blk = sg + b * NSG;
+    if (blk < nb) {
+      const int c = blk * RB + lane * 8;
+      device float4 *dst = (device float4 *)(xr + c);
+      const device float4 *w = (const device float4 *)(post + c);
+      dst[0] += w[0] * v[b][0] * inv;
+      dst[1] += w[1] * v[b][1] * inv;
+    }
+  }
+}
+
+// p[m] = half(softmax(scale * s[m][0 .. valid))), zeros from valid to L. One threadgroup per row (the FLUX
+// decoder's single-head attention, its scores materialized a chunk of query rows at a time).
+struct SoftmaxParams { int M, L, valid; float scale; };
+
+kernel void softmax_rows(device const float *s [[buffer(0)]],
+                         device half *out [[buffer(1)]],
+                         constant SoftmaxParams &p [[buffer(2)]],
+                         uint m [[threadgroup_position_in_grid]],
+                         ushort tid [[thread_index_in_threadgroup]],
+                         ushort sg [[simdgroup_index_in_threadgroup]],
+                         ushort lane [[thread_index_in_simdgroup]])
+{
+  threadgroup float tmp[NSG];
+  const device float *row = s + size_t(m) * p.L;
+  device half *o = out + size_t(m) * p.L;
+  float mx = -INFINITY;
+  for (int c = tid; c < p.valid; c += NSG * 32) mx = max(mx, row[c] * p.scale);
+  mx = simd_max(mx);
+  if (lane == 0) tmp[sg] = mx;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  mx = tmp[0];
+  for (int i = 1; i < NSG; i++) mx = max(mx, tmp[i]);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float sum = 0;
+  for (int c = tid; c < p.valid; c += NSG * 32) sum += exp(row[c] * p.scale - mx);
+  const float inv = 1.0f / tg_sum<NSG>(sum, tmp, sg, lane);
+  for (int c = tid; c < p.L; c += NSG * 32) o[c] = c < p.valid ? half(exp(row[c] * p.scale - mx) * inv) : half(0);
 }

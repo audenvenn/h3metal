@@ -87,17 +87,25 @@ def check(fmt, M=200, N=256, K=512, epi=0, out_dtype="f16", seed=0, tile=(64, 12
     assert err < (2e-3 if out_dtype != "bf16" else 1e-2), err
 
 
-def check_dit_tiles():
-    """Every tile and dispatch split the transformer uses (h3metal/dit.py: _tile), at its real shapes and row
-    counts (1024, 2048 and 4096 pixels square), against a float64 reference on a sample of rows."""
-    from h3metal.dit import _tile
-    D, inner, F = 5376, 7168, 14336
+def check_dit_tiles(model: str = "minimax-h3"):
+    """Every tile and dispatch split a transformer uses (h3metal/dit.py: _tile, h3metal/zimage.py: _ztile), at
+    its real shapes and row counts (1024, 2048 and 4096 pixels square), against a float64 reference on a sample
+    of rows."""
+    if model == "minimax-h3":
+        from h3metal.dit import _tile
+        D, inner, F = 5376, 7168, 14336
+        products = (("qkv", D, 3 * inner, 0), ("out", inner, D, 1), ("fc1", D, 2 * F, 0), ("fc2", F, D, 1))
+        sizes = (1324, 4396, 16684)
+    else:  # Z-Image: every product stores its result (the norm after it needs the whole row)
+        from h3metal.zimage import _ztile as _tile
+        D, F = 3840, 10240
+        products = (("qkv", D, 3 * D, 0), ("out", D, D, 0), ("fc1", D, 2 * F, 0), ("fc2", F, D, 0))
+        sizes = (4160, 16448)  # 1024 and 2048 pixels square (64 caption rows)
     gpu = Gpu()
     rng = np.random.default_rng(1)
     for fmt in ("q8", "q4"):
-        for name, K, N, epi in (("qkv", D, 3 * inner, 0), ("out", inner, D, 1), ("fc1", D, 2 * F, 0),
-                                ("fc2", F, D, 1)):
-            for M in (1324, 4396, 16684):
+        for name, K, N, epi in products:
+            for M in sizes:
                 cfg = _tile(QWeight(fmt, None, None, N, K), M)
                 m_pad = (M + 127) // 128 * 128
                 a = rng.integers(-127, 128, size=(m_pad, K), dtype=np.int8)
@@ -139,4 +147,5 @@ if __name__ == "__main__":
         check(fmt, epi=1, K=1024, ksplit=2)
     check("q8", epi=1, K=2048, ksplit=4, tile=(64, 256, 8))
     check_dit_tiles()
+    check_dit_tiles("z-image")
     print("ok")

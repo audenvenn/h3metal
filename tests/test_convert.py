@@ -132,7 +132,8 @@ def test_cli_sizes_and_device_check():
     from h3metal.gpu import has_matrix_units
     assert size_for("16:9") == (5472, 3072) and size_for("1:1") == (4096, 4096)  # MiniMax's recommended sizes
     assert _size("2048x1536") == (2048, 1536) and _size("16:9@2k") == size_for("16:9", 2048 * 2048)
-    for bad in ("2000x2000", "100x100", "16:9@8k", "big"):
+    assert _size("2000x1008") == (2000, 1008)  # multiples of 16 pass (Z-Image); MiniMax-H3 checks for 32 later
+    for bad in ("2008x2008", "100x100", "16:9@8k", "big"):
         try:
             _size(bad)
             raise AssertionError(bad)

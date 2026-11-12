@@ -150,7 +150,7 @@ def copy_f32(gpu: Gpu, src: Tensor, dst: Tensor, n: int):
 
 
 def layer_norm(gpu: Gpu, x: Tensor, w: Tensor, b: Tensor, out: Tensor, M: int, D: int, eps: float):
-    k = gpu.kernel("ops.metal", "layer_norm", NSG=8)
+    k = gpu.kernel("ops.metal", "layer_norm", NSG=8, LN_OUT_T=OUT_DT[out.dtype])
     gpu.launch(k, (M, 1, 1), (256, 1, 1), [x, w, b, out], pack("3if", M, D, D, eps))
 
 
@@ -160,14 +160,19 @@ def swiglu(gpu: Gpu, x: Tensor, out: Tensor, M: int, F: int):
 
 
 def im2col(gpu: Gpu, x: Tensor, col: Tensor, *, N: int, H: int, W: int, C: int, KH: int, KW: int, stride: int,
-           pad_t: int, pad_l: int, K: int):
-    """col[N*Ho*Wo][K] <- the (ky, kx, c) taps of each output pixel of an NHWC half image, reflect-padded."""
+           pad_t: int, pad_l: int, K: int, zero_pad: bool = False, up2: bool = False, row0: int = 0,
+           rows: int | None = None):
+    """col[N*Ho*Wo][K] <- the (ky, kx, c) taps of each output pixel of an NHWC half image, reflect-padded (or
+    zero-padded). up2: the input is x upsampled 2x by nearest neighbour (H, W the upsampled sides).
+    row0, rows: only output rows row0 .. row0 + rows (a stripe; Ho is then rows)."""
     Ho = (H + 2 * pad_t - KH) // stride + 1 if stride == 1 else (H + 1 - KH) // stride + 1
     Wo = (W + 2 * pad_l - KW) // stride + 1 if stride == 1 else (W + 1 - KW) // stride + 1
-    k = gpu.kernel("ops.metal", "im2col")
+    if rows is not None:
+        Ho = rows
+    k = gpu.kernel("ops.metal", "im2col", ZPAD=int(zero_pad), UP2=int(up2))
     total = -(-C // 4) * KH * KW * N * Ho * Wo
     gpu.launch(k, (-(-total // 256), 1, 1), (256, 1, 1), [x, col],
-               pack("12i", N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K))
+               pack("13i", N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K, row0))
     return Ho, Wo
 
 
@@ -198,3 +203,18 @@ def gelu(gpu: Gpu, x: Tensor, y: Tensor, n: int, exact: bool = False):
     """y = half(gelu(x)) over n floats; exact: the erf form, else the tanh approximation."""
     k = gpu.kernel("ops.metal", "gelu")
     gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, y], pack("2i", n, int(exact)))
+
+
+def post_norm_add(gpu: Gpu, x: Tensor, y: Tensor, post: Tensor, M: int, D: int, *, eps: float,
+                  x_stride: int | None = None):
+    """x += post * rmsnorm(y), row by row: a product's output normalized and gated into the residual stream."""
+    nsg, maxb = _rows_kernel_cfg(D)
+    k = gpu.kernel("ops.metal", "post_norm_add", NSG=nsg, MAXB=maxb)
+    params = pack("4if", M, D, x_stride or D, 0, eps)
+    gpu.launch(k, (M, 1, 1), (32 * nsg, 1, 1), [x, y, post], params)
+
+
+def softmax_rows(gpu: Gpu, s: Tensor, p: Tensor, M: int, L: int, *, valid: int | None = None, scale: float = 1.0):
+    """p[m] = half(softmax(scale * s[m][:valid])), zeros beyond valid; s float [M][L], p half [M][L]."""
+    k = gpu.kernel("ops.metal", "softmax_rows", NSG=8)
+    gpu.launch(k, (M, 1, 1), (256, 1, 1), [s, p], pack("3if", M, L, valid or L, scale))
