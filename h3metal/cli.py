@@ -36,6 +36,41 @@ def _size(s: str):
     return w, h
 
 
+def _open_image(path: str):
+    """A reference image; formats Pillow cannot read (HEIC photos, for instance) go through macOS's sips."""
+    from PIL import Image
+    try:
+        im = Image.open(path)
+        im.load()
+        return im
+    except Exception:
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            png = os.path.join(d, "ref.png")
+            r = subprocess.run(["sips", "-s", "format", "png", path, "--out", png], capture_output=True)
+            if r.returncode or not os.path.exists(png):
+                raise ValueError(f"cannot read the image {path}")
+            im = Image.open(png)
+            im.load()
+            return im
+
+
+def _save(img, path: str, meta: dict):
+    """Saves the image; PNG files carry the generation parameters and say that the image is AI-generated."""
+    from PIL import Image, PngImagePlugin
+    im = Image.fromarray(img)
+    if path.lower().endswith(".png"):
+        info = PngImagePlugin.PngInfo()
+        info.add_text("Software", "h3metal")
+        info.add_text("Description", "AI-generated image (MiniMax-H3-Image)")
+        for k, v in meta.items():
+            info.add_text(k, str(v))
+        im.save(path, pnginfo=info)
+    else:
+        im.save(path)
+
+
 def _progress(step, total):
     sys.stderr.write(f"\r  denoising {step}/{total}")
     sys.stderr.flush()
@@ -44,7 +79,6 @@ def _progress(step, total):
 
 
 def cmd_generate(a):
-    from PIL import Image
     from .pipeline import Pipeline, generate_edit
     t0 = time.time()
     pipe = Pipeline(a.model)
@@ -54,7 +88,7 @@ def cmd_generate(a):
         seed = a.seed + i
         t1 = time.time()
         if a.image:
-            refs = [Image.open(p) for p in a.image]
+            refs = [_open_image(p) for p in a.image]
             img, timing = generate_edit(pipe, a.prompt, refs, w, h, seed=seed, min_area=a.min_area,
                                         progress=_progress)
         else:
@@ -63,7 +97,8 @@ def cmd_generate(a):
         if a.count > 1:
             stem, ext = os.path.splitext(out)
             out = f"{stem}_{seed}{ext or '.png'}"
-        Image.fromarray(img).save(out)
+        _save(img, out, {"prompt": a.prompt, "seed": seed, "size": f"{w}x{h}", "model": "MiniMax-H3-Image",
+                         "references": ", ".join(os.path.basename(p) for p in a.image or []) or "none"})
         print(f"{out}: {w}x{h}, seed {seed}; {timing}; wall {time.time() - (t0 if i == 0 else t1):.1f}s")
 
 
