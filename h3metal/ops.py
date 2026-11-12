@@ -57,17 +57,19 @@ def gemm(gpu: Gpu, a: Tensor, wt: QWeight, out: Tensor, M: int, *, sa: Tensor | 
 
 def attention(gpu: Gpu, q: Tensor, k: Tensor, v: Tensor, out: Tensor, *, Lq: int, L: int, H: int, KVH: int,
               D: int, q_rows: int, k_rows: int, scale: float, causal: bool = False, causal_off: int = 0,
-              wm: int = 8, bk: int = 32, seq_heads: int | None = None, seq_rows: int = 0, **variant):
+              wm: int = 8, bk: int = 32, seq_heads: int | None = None, seq_rows: int = 0,
+              q_scale: Tensor | None = None, k_scale: Tensor | None = None, **variant):
     """out = softmax(q k^T * scale) v per head (kernels/attention.metal); k_rows a multiple of bk."""
     import math
     out_t = OUT_DT[out.dtype]
     variant.pop("TG", None)
     kern = gpu.kernel("attention.metal", "attention", HD=D, WM=wm, BK=bk, CAUSAL=int(causal), O_T=out_t,
-                      **variant)
+                      QK8=int(q_scale is not None), **variant)
     sh = seq_heads or H
     params = pack("7if3i", Lq, L, H, KVH, q_rows, k_rows, sh * D, scale * 1.4426950408889634, causal_off, sh,
                   seq_rows)
-    gpu.launch(kern, (math.ceil(Lq / (16 * wm)), H, 1), (32 * wm, 1, 1), [q, k, v, out], params)
+    gpu.launch(kern, (math.ceil(Lq / (16 * wm)), H, 1), (32 * wm, 1, 1), [q, k, v, out, None, q_scale, k_scale],
+               params, params_index=4)
 
 def _rows_kernel_cfg(D: int):
     """SIMD-groups and rotation blocks per SIMD-group for a row of D channels."""
@@ -102,13 +104,14 @@ def rot_q8(gpu: Gpu, x: Tensor, out: Tensor, sa: Tensor | None, M: int, D: int, 
 def qk_norm_rope(gpu: Gpu, qkv: Tensor, wq: Tensor | None, wk: Tensor | None, cos: Tensor | None,
                  sin: Tensor | None, Q: Tensor, K: Tensor, V: Tensor, *, M: int, Hq: int, Hk: int, Hv: int,
                  hd: int, out_rows: int, rot: int, eps: float, norm: bool = True, in_stride: int | None = None,
-                 seq_len: int | None = None):
+                 seq_len: int | None = None, q_scale: Tensor | None = None, k_scale: Tensor | None = None):
     in_t = OUT_DT[qkv.dtype]
     nsg = 8
-    k = gpu.kernel("ops.metal", "qk_norm_rope", NSG=nsg, HDIM=hd, IN_T=in_t)
+    k = gpu.kernel("ops.metal", "qk_norm_rope", NSG=nsg, HDIM=hd, IN_T=in_t, QK8=int(q_scale is not None))
     slots = Hq + Hk + Hv
     params = pack("8ifi", M, Hq, Hk, Hv, in_stride or slots * hd, out_rows, rot, int(norm), eps, seq_len or M)
-    gpu.launch(k, (M, -(-slots // nsg), 1), (32 * nsg, 1, 1), [qkv, wq, wk, cos, sin, Q, K, V], params)
+    gpu.launch(k, (M, -(-slots // nsg), 1), (32 * nsg, 1, 1), [qkv, wq, wk, cos, sin, Q, K, V, None, q_scale, k_scale],
+               params, params_index=8)
 
 
 def linear_f32(gpu: Gpu, x: Tensor, w: Tensor, b: Tensor | None, out: Tensor, *, M: int, N: int, K: int,

@@ -54,3 +54,43 @@ if __name__ == "__main__":
         check(1000, 1037, 2, 2, 128, wm=8, **var)
     print("ok")
 
+
+
+def check_q8(Lq, L, H, KVH, D, causal=False, wm=8, seed=0):
+    """Integer score product: per-row int8 queries and keys, against the float reference of the dequantized
+    inputs."""
+    rng = np.random.default_rng(seed)
+    gpu = Gpu()
+    q_rows = (Lq + 255) // 256 * 256
+    k_rows = (L + 31) // 32 * 32
+    q = rng.standard_normal((H, Lq, D)).astype(np.float32)
+    k = rng.standard_normal((KVH, L, D)).astype(np.float32)
+    v = rng.standard_normal((KVH, L, D)).astype(np.float16)
+
+    def q8(x):
+        s = np.abs(x).max(-1, keepdims=True) / 127
+        return np.rint(x / s).astype(np.int8), s[..., 0].astype(np.float32)
+    qi, qs = q8(q)
+    ki, ks = q8(k)
+    Q = gpu.empty((H, q_rows, D), "i8"); Q.numpy()[:, :Lq] = qi
+    K = gpu.empty((KVH, k_rows, D), "i8"); K.numpy()[:, :L] = ki
+    Vt = gpu.empty((KVH, k_rows, D), "f16"); Vt.numpy()[:, :L] = v
+    QS = gpu.empty((H, q_rows), "f32"); QS.numpy()[:, :Lq] = qs
+    KS = gpu.empty((KVH, k_rows), "f32"); KS.numpy()[:, :L] = ks
+    O = gpu.empty((q_rows, H * D), "f16")
+    attention(gpu, Q, K, Vt, O, Lq=Lq, L=L, H=H, KVH=KVH, D=D, q_rows=q_rows, k_rows=k_rows, scale=D ** -0.5,
+              causal=causal, wm=wm, q_scale=QS, k_scale=KS)
+    gpu.wait()
+    got = O.numpy()[:Lq].astype(np.float64)
+    ref = ref_attn(qi * qs[..., None], ki * ks[..., None], v, D ** -0.5, causal)
+    err = np.abs(got - ref).max()
+    print(f"q8 Lq={Lq} L={L} H={H} KVH={KVH} D={D} causal={causal}: max abs err {err:.2e}")
+    assert err < 5e-3
+
+
+if __name__ == "__main__":
+    check_q8(100, 100, 2, 2, 128)
+    check_q8(300, 1037, 3, 3, 128)
+    check_q8(130, 130, 8, 2, 128, causal=True)
+    check_q8(64, 64, 4, 4, 64)
+    print("ok q8")

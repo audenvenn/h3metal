@@ -275,15 +275,28 @@ struct QkRopeParams {
                 // are output heads j * H .. j * H + H - 1); the rotary tables are per row of a sequence
 };
 
+// With QK8, queries and keys are written as int8 with one scale per row (qs, ks) for the
+// integer score product of kernels/attention.metal.
+#ifndef QK8
+#define QK8 0
+#endif
+#if QK8
+#define QK_T char
+#else
+#define QK_T half
+#endif
+
 kernel void qk_norm_rope(device const IN_T *in [[buffer(0)]],
                          device const float *wq [[buffer(1)]],
                          device const float *wk [[buffer(2)]],
                          device const float *cs [[buffer(3)]],
                          device const float *sn [[buffer(4)]],
-                         device half *Q [[buffer(5)]],
-                         device half *K [[buffer(6)]],
+                         device QK_T *Q [[buffer(5)]],
+                         device QK_T *K [[buffer(6)]],
                          device half *V [[buffer(7)]],
                          constant QkRopeParams &p [[buffer(8)]],
+                         device float *qsc [[buffer(9)]],
+                         device float *ksc [[buffer(10)]],
                          uint2 tg [[threadgroup_position_in_grid]],
                          ushort sg [[simdgroup_index_in_threadgroup]],
                          ushort lane [[thread_index_in_simdgroup]])
@@ -329,9 +342,20 @@ kernel void qk_norm_rope(device const IN_T *in [[buffer(0)]],
       }
     }
     const size_t hrow = isq ? (size_t(sq) * p.Hq + h) * p.out_rows + r : (size_t(sq) * p.Hk + h) * p.out_rows + r;
-    device half *dst = (isq ? Q : K) + hrow * HDIM;
+    device QK_T *dst = (isq ? Q : K) + hrow * HDIM;
+#if QK8
+    float amax = 0;
+#pragma clang loop unroll(full)
+    for (int i = 0; i < PER; i++) amax = max(amax, fabs(v[i]));
+    amax = simd_max(amax);
+    const float scale = amax > 0 ? amax / 127.0f : 1.0f;
+#pragma clang loop unroll(full)
+    for (int i = 0; i < PER; i++) dst[lane * PER + i] = char(rint(v[i] / scale));
+    if (lane == 0) (isq ? qsc : ksc)[hrow] = scale;
+#else
 #pragma clang loop unroll(full)
     for (int i = 0; i < PER; i++) dst[lane * PER + i] = half(v[i]);
+#endif
   } else {
     device half *dst = V + ((size_t(sq) * p.Hv + slot - p.Hq - p.Hk) * p.out_rows + r) * HDIM;
 #pragma clang loop unroll(full)

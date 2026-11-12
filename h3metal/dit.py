@@ -12,6 +12,7 @@ selects its precomputed modulation (h3metal/convert.py):
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -113,6 +114,8 @@ class DiT:
         self.patch_dim = self.x_embed_w.shape[1]
         self._bufs = None
         self.attn_cfg = dict(wm=16, bk=32)
+        # Integer score product in attention (queries and keys in int8, one scale per row).
+        self.qk8 = os.environ.get("H3METAL_QK8", "1") == "1"
 
     # -- buffers ---------------------------------------------------------------------------------------------------
     def _alloc(self, S: int):
@@ -131,6 +134,8 @@ class DiT:
             "o": g.empty((Sp, self.inner), "bf16"),
             "Q": g.empty((self.H, Sp, self.hd), "f16"),
             "K": g.empty((self.H, Sp, self.hd), "f16"),
+            "qs": g.empty((self.H, Sp), "f32"),
+            "ks": g.empty((self.H, Sp), "f32"),
             "V": g.empty((self.H, Sp, self.hd), "f16"),
             "rt": g.empty((Sp,), "u8"),
             "rt0": g.empty((Sp,), "u8"),
@@ -161,10 +166,14 @@ class DiT:
         ops.norm_mod_q8(g, x, mod1, rt, a8.view((Sp, D)), sa, S, D, eps=eps, mod_stride=mod_stride)
         qkv = b["wide"].view((Sp, 3 * inner))
         ops.gemm(g, a8.view((Sp, D)), blk["qkv"], qkv, S, sa=sa, **_tile(blk["qkv"]))
-        ops.qk_norm_rope(g, qkv, blk["q_norm"], blk["k_norm"], b["cos"], b["sin"], b["Q"], b["K"], b["V"], M=S,
-                         Hq=H, Hk=H, Hv=H, hd=hd, out_rows=Sp, rot=rot, eps=self.cfg["qk_eps"])
-        ops.attention(g, b["Q"], b["K"], b["V"], b["o"], Lq=S, L=S, H=H, KVH=H, D=hd, q_rows=Sp, k_rows=Sp,
-                      scale=hd ** -0.5, **self.attn_cfg)
+        q8 = self.qk8 and rot > 0  # the refiner's text-only attention stays in half precision
+        Qb = b["Q"] if not q8 else b["Q"].view(b["Q"].shape, "i8")
+        Kb = b["K"] if not q8 else b["K"].view(b["K"].shape, "i8")
+        sc = dict(q_scale=b["qs"], k_scale=b["ks"]) if q8 else {}
+        ops.qk_norm_rope(g, qkv, blk["q_norm"], blk["k_norm"], b["cos"], b["sin"], Qb, Kb, b["V"], M=S,
+                         Hq=H, Hk=H, Hv=H, hd=hd, out_rows=Sp, rot=rot, eps=self.cfg["qk_eps"], **sc)
+        ops.attention(g, Qb, Kb, b["V"], b["o"], Lq=S, L=S, H=H, KVH=H, D=hd, q_rows=Sp, k_rows=Sp,
+                      scale=hd ** -0.5, **self.attn_cfg, **sc)
         ops.rot_q8(g, b["o"], a8.view((Sp, inner)), sa, S, inner)
         ops.gemm(g, a8.view((Sp, inner)), blk["out"], x, S, sa=sa, epi=1, rtype=rt, gate=g1, g_stride=g_stride,
                  **_tile(blk["out"]))
