@@ -58,6 +58,9 @@ def main():
     rt = np.linalg.norm(h[~vis] - ref[~vis]) / np.linalg.norm(ref[~vis])
     print(f"hidden_states[50] ({te.fmt}, {dt:.1f} s): rel error {rel:.4f} (vision rows {rv:.4f}, text rows {rt:.4f}); "
           f"token cosine mean {cos.mean():.5f} min {cos.min():.5f}")
+    worst = np.argsort(cos)[:5]
+    print("lowest cosines:", ", ".join(f"token {i} (id {int(ids[i])}, {'vision' if vis[i] else 'text'}, "
+                                       f"|ref| {np.linalg.norm(ref[i]):.1f}): {cos[i]:.3f}" for i in worst))
     assert cos.mean() > 0.99, "the edit presentation does not match the reference"
 
 
