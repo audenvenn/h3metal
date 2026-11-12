@@ -134,4 +134,7 @@ if __name__ == "__main__":
         check_q8v2(1000, 1037, 2, 2, 96, qr=qr, bk=64)
         check_q8v2(300, 1037, 3, 3, 128, qr=qr, PVH=1)
         check_q8v2(1000, 4096, 2, 2, 128, qr=qr, bk=64, PVH=1)
+        check_q8v2(300, 1037, 3, 3, 128, qr=qr, DB=1)
+        check_q8v2(1000, 4096, 2, 2, 128, qr=qr, wm=16, DB=1, PVH=1)
+        check_q8v2(64, 64, 4, 4, 64, qr=qr, DB=1)
     print("ok q8v2")

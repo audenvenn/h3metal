@@ -29,6 +29,10 @@ using namespace metal;
 #ifndef PVH
 #define PVH 0  // 1: each block's P V accumulates in half (32 terms, P <= 1), then adds into the float output
 #endif
+#ifndef DB
+#define DB 0   // 1: double-buffered keys and values: the next block's loads are issued before this block's
+               // products and stored after them, one barrier per block
+#endif
 
 #define BQ (16 * QR * WM)
 #define DF (HD / 16)
@@ -47,9 +51,9 @@ kernel void attention_q8(device const int8_t *Q [[buffer(0)]],
                          ushort sg [[simdgroup_index_in_threadgroup]],
                          ushort tid [[thread_index_in_threadgroup]])
 {
-  threadgroup int8_t ks[BK * LDQK];
-  threadgroup half vs[BK * LDK];
-  threadgroup float kscale[BK];
+  threadgroup int8_t ks[DB + 1][BK * LDQK];
+  threadgroup half vs[DB + 1][BK * LDK];
+  threadgroup float kscale[DB + 1][BK];
   const int h = int(tg.y);
   const int kvh = h / (p.H / p.KVH);
   const int q0 = int(tg.x) * BQ + int(sg) * 16 * QR;
@@ -84,21 +88,70 @@ kernel void attention_q8(device const int8_t *Q [[buffer(0)]],
   }
   constexpr int NT = WM * 32;
   constexpr int CHUNKS = BK * HD / 8;
+  constexpr int PER = (CHUNKS + NT - 1) / NT;  // 8-value chunks of keys and values each thread moves per block
+
+#if DB
+  // Block 0 into buffer 0.
+#pragma clang loop unroll(full)
+  for (int i = 0; i < PER; i++) {
+    const int c = tid + i * NT;
+    if (c < CHUNKS) {
+      const int rr = c / (HD / 8), col = (c % (HD / 8)) * 8;
+      *(threadgroup packed_char4 *)(ks[0] + rr * LDQK + col) = *(const device packed_char4 *)(K + size_t(rr) * HD + col);
+      *(threadgroup packed_char4 *)(ks[0] + rr * LDQK + col + 4) = *(const device packed_char4 *)(K + size_t(rr) * HD + col + 4);
+      *(threadgroup half4 *)(vs[0] + rr * LDK + col) = *(const device half4 *)(V + size_t(rr) * HD + col);
+      *(threadgroup half4 *)(vs[0] + rr * LDK + col + 4) = *(const device half4 *)(V + size_t(rr) * HD + col + 4);
+    }
+  }
+  if (tid < BK) kscale[0][tid] = ksh[tid];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  int cur = 0;
+#endif
 
   for (int kb = 0; kb < p.L; kb += BK) {
+#if DB
+    const bool more = kb + BK < p.L;
+    packed_char4 rk0[PER], rk1[PER];
+    half4 rv0[PER], rv1[PER];
+    float rks = 0.0f;
+    if (more) {  // the next block's loads, in flight while this block computes
+#pragma clang loop unroll(full)
+      for (int i = 0; i < PER; i++) {
+        const int c = tid + i * NT;
+        if (c < CHUNKS) {
+          const int rr = c / (HD / 8), col = (c % (HD / 8)) * 8;
+          const size_t at = size_t(kb + BK + rr) * HD + col;
+          rk0[i] = *(const device packed_char4 *)(K + at);
+          rk1[i] = *(const device packed_char4 *)(K + at + 4);
+          rv0[i] = *(const device half4 *)(V + at);
+          rv1[i] = *(const device half4 *)(V + at + 4);
+        }
+      }
+      if (tid < BK) rks = ksh[kb + BK + tid];
+    }
+    const threadgroup int8_t *ksb = ks[cur];
+    const threadgroup half *vsb = vs[cur];
+    const threadgroup float *kscb = kscale[cur];
+    if (active) {
+#else
     threadgroup_barrier(mem_flags::mem_threadgroup);
 #pragma clang loop unroll(full)
     for (int c = tid; c < CHUNKS; c += NT) {
       const int rr = c / (HD / 8), col = (c % (HD / 8)) * 8;
-      *(threadgroup packed_char4 *)(ks + rr * LDQK + col) = *(const device packed_char4 *)(K + size_t(kb + rr) * HD + col);
-      *(threadgroup packed_char4 *)(ks + rr * LDQK + col + 4) =
+      *(threadgroup packed_char4 *)(ks[0] + rr * LDQK + col) = *(const device packed_char4 *)(K + size_t(kb + rr) * HD + col);
+      *(threadgroup packed_char4 *)(ks[0] + rr * LDQK + col + 4) =
           *(const device packed_char4 *)(K + size_t(kb + rr) * HD + col + 4);
-      *(threadgroup half4 *)(vs + rr * LDK + col) = *(const device half4 *)(V + size_t(kb + rr) * HD + col);
-      *(threadgroup half4 *)(vs + rr * LDK + col + 4) = *(const device half4 *)(V + size_t(kb + rr) * HD + col + 4);
+      *(threadgroup half4 *)(vs[0] + rr * LDK + col) = *(const device half4 *)(V + size_t(kb + rr) * HD + col);
+      *(threadgroup half4 *)(vs[0] + rr * LDK + col + 4) = *(const device half4 *)(V + size_t(kb + rr) * HD + col + 4);
     }
-    if (tid < BK) kscale[tid] = ksh[kb + tid];
+    if (tid < BK) kscale[0][tid] = ksh[kb + tid];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (!active) continue;
+    const threadgroup int8_t *ksb = ks[0];
+    const threadgroup half *vsb = vs[0];
+    const threadgroup float *kscb = kscale[0];
+    {
+#endif
 
     // Scores: t = (q . k) * k_scale; the products accumulate in int32.
     nax::frag<float> s[QR][KF];
@@ -114,8 +167,8 @@ kernel void attention_q8(device const int8_t *Q [[buffer(0)]],
 #pragma clang loop unroll(full)
         for (short d = 0; d < DF; d++) {
           nax::frag<int8_t> k0, k1;
-          nax::load_tg(k0, ks + (j * 16) * LDQK + d * 16, LDQK, sc);
-          nax::load_tg(k1, ks + (j * 16 + 16) * LDQK + d * 16, LDQK, sc);
+          nax::load_tg(k0, ksb + (j * 16) * LDQK + d * 16, LDQK, sc);
+          nax::load_tg(k1, ksb + (j * 16 + 16) * LDQK + d * 16, LDQK, sc);
 #pragma clang loop unroll(full)
           for (short r = 0; r < QR; r++) nax::mma<int, int8_t, int8_t, false, true>(si[r][j], si[r][j + 1], qf[r][d], k0, k1);
         }
@@ -129,7 +182,7 @@ kernel void attention_q8(device const int8_t *Q [[buffer(0)]],
     const bool edge = kb + BK > p.L;
 #pragma clang loop unroll(full)
     for (short j = 0; j < KF; j++) {
-      const float4 kq = *(const threadgroup float4 *)(kscale + j * 16 + sc.x);
+      const float4 kq = *(const threadgroup float4 *)(kscb + j * 16 + sc.x);
 #pragma clang loop unroll(full)
       for (short r = 0; r < QR; r++) {
 #pragma clang loop unroll(full)
@@ -189,8 +242,8 @@ kernel void attention_q8(device const int8_t *Q [[buffer(0)]],
 #pragma clang loop unroll(full)
       for (short j = 0; j < KF; j++) {
         nax::frag<half> v0, v1;
-        nax::load_tg(v0, vs + (j * 16) * LDK + d * 16, LDK, sc);
-        nax::load_tg(v1, vs + (j * 16) * LDK + d * 16 + 16, LDK, sc);
+        nax::load_tg(v0, vsb + (j * 16) * LDK + d * 16, LDK, sc);
+        nax::load_tg(v1, vsb + (j * 16) * LDK + d * 16 + 16, LDK, sc);
 #pragma clang loop unroll(full)
         for (short r = 0; r < QR; r++) nax::mma<half, half, half, false, false>(acc0[r], acc1[r], ph[r][j], v0, v1);
       }
@@ -209,12 +262,31 @@ kernel void attention_q8(device const int8_t *Q [[buffer(0)]],
 #pragma clang loop unroll(full)
       for (short d = 0; d < DF; d += 2) {
         nax::frag<half> v0, v1;
-        nax::load_tg(v0, vs + (j * 16) * LDK + d * 16, LDK, sc);
-        nax::load_tg(v1, vs + (j * 16) * LDK + d * 16 + 16, LDK, sc);
+        nax::load_tg(v0, vsb + (j * 16) * LDK + d * 16, LDK, sc);
+        nax::load_tg(v1, vsb + (j * 16) * LDK + d * 16 + 16, LDK, sc);
 #pragma clang loop unroll(full)
         for (short r = 0; r < QR; r++) nax::mma<float, half, half, false, false>(o[r][d], o[r][d + 1], ph[r], v0, v1);
       }
     }
+#endif
+    }  // compute
+#if DB
+    if (more) {  // the next block into the other buffer, read after the barrier
+#pragma clang loop unroll(full)
+      for (int i = 0; i < PER; i++) {
+        const int c = tid + i * NT;
+        if (c < CHUNKS) {
+          const int rr = c / (HD / 8), col = (c % (HD / 8)) * 8;
+          *(threadgroup packed_char4 *)(ks[cur ^ 1] + rr * LDQK + col) = rk0[i];
+          *(threadgroup packed_char4 *)(ks[cur ^ 1] + rr * LDQK + col + 4) = rk1[i];
+          *(threadgroup half4 *)(vs[cur ^ 1] + rr * LDK + col) = rv0[i];
+          *(threadgroup half4 *)(vs[cur ^ 1] + rr * LDK + col + 4) = rv1[i];
+        }
+      }
+      if (tid < BK) kscale[cur ^ 1][tid] = rks;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    cur ^= 1;
 #endif
   }
   if (!active) return;
