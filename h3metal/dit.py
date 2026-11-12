@@ -113,7 +113,7 @@ class DiT:
         self.heads_w, self.heads_b = wf.tensor("heads.w"), wf.tensor("heads.b")
         self.patch_dim = self.x_embed_w.shape[1]
         self._bufs = None
-        self.attn_cfg = dict(wm=16, bk=32)
+        self.attn_cfg = dict(wm=32, bk=32)
         # Integer score product in attention (queries and keys in int8, one scale per row).
         self.qk8 = os.environ.get("H3METAL_QK8", "1") == "1"
 
