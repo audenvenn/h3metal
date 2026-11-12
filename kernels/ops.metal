@@ -556,35 +556,31 @@ kernel void im2col(device const half *x [[buffer(0)]],
 }
 
 // GroupNorm statistics per image and group, in two passes: pass 0 sums the values, pass 1 the squared
-// deviations from the mean pass 0 found. stats[n][g] = (sum, sum of squared deviations).
-struct GnParams { int N, HW, C, G; float eps; int silu; int pass; int W; };
+// deviations from the mean pass 0 found; stats[n][g] = (sum, sum of squared deviations). No atomics, so equal
+// inputs give equal statistics bit for bit (float addition is not associative: atomics that land in a varying
+// order made the same image normalize slightly differently from run to run). Each pass is gn_stats, one
+// threadgroup of 256 threads per run of GN_CHUNK pixels of one image writing that run's per-group sums to
+// part[n][chunk][g], then gn_reduce, one thread per image and group adding the runs in order.
+struct GnParams { int N, HW, C, G; float eps; int silu; int pass; int W; int chunks; };
 #ifndef PADW
 #define PADW 0  // gn_apply: write the inside of images with a one-pixel border (the input of a conv3x3)
 #endif
 #define GN_CHUNK 2048
 
 kernel void gn_stats(device const float *x [[buffer(0)]],
-                     device atomic_float *stats [[buffer(1)]],
-                     constant GnParams &p [[buffer(2)]],
+                     device float *part [[buffer(1)]],
+                     device const float *stats [[buffer(2)]],
+                     constant GnParams &p [[buffer(3)]],
                      uint2 tg [[threadgroup_position_in_grid]],
-                     ushort tid [[thread_index_in_threadgroup]],
-                     ushort lane [[thread_index_in_simdgroup]])
+                     ushort tid [[thread_index_in_threadgroup]])
 {
-  // One threadgroup of 256 threads per run of GN_CHUNK pixels of one image. Thread t reads channels
-  // 4 (t % C4) .. +3 of every (256 / C4)-th pixel, so a SIMD-group reads whole rows (coalesced); the four
-  // channels of a float4 always share a group (groups hold multiples of four channels). Partial sums meet in
-  // threadgroup memory, then one atomic per group goes to the device.
-  threadgroup atomic_float part[32];
-  const int n = int(tg.y), px0 = int(tg.x) * GN_CHUNK;
+  // Thread t reads channels 4 (t % C4) .. +3 of every (256 / C4)-th pixel of the run, so a SIMD-group reads
+  // whole rows (coalesced); the four channels of a float4 always share a group (groups hold multiples of four).
+  threadgroup float tmp[256];
+  const int n = int(tg.y), chunk = int(tg.x), px0 = chunk * GN_CHUNK;
   const int C4 = p.C / 4, cg = p.C / p.G;
-  if (tid < p.G) atomic_store_explicit(&part[tid], 0.0f, memory_order_relaxed);
-  threadgroup_barrier(mem_flags::mem_threadgroup);
   const int q = tid % C4, g = q * 4 / cg;
-  float mean = 0;
-  if (p.pass == 1) {
-    device const float *st = (device const float *)stats;
-    mean = st[(n * p.G + g) * 2] / float(p.HW * cg);
-  }
+  const float mean = p.pass == 1 ? stats[(n * p.G + g) * 2] / float(p.HW * cg) : 0.0f;
   const device float4 *x4 = (const device float4 *)x + size_t(n) * p.HW * C4;
   float s = 0;
   const int end = min(px0 + GN_CHUNK, p.HW);
@@ -592,13 +588,27 @@ kernel void gn_stats(device const float *x [[buffer(0)]],
     const float4 v = x4[size_t(px) * C4 + q] - mean;
     s += p.pass == 1 ? dot(v, v) : (v.x + v.y) + (v.z + v.w);
   }
-  // Lanes of a SIMD-group that share a group (C4 >= 32: all lanes read neighbouring channel quads) add first.
-  if (cg >= 128) s = simd_sum(s);
-  if (cg < 128 || lane == 0) atomic_fetch_add_explicit(&part[g], s, memory_order_relaxed);
+  tmp[tid] = s;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (tid < p.G)
-    atomic_fetch_add_explicit(&stats[(n * p.G + tid) * 2 + p.pass], atomic_load_explicit(&part[tid], memory_order_relaxed),
-                              memory_order_relaxed);
+  if (tid < p.G) {  // group tid: channel quads tid * cg/4 .. +cg/4 of every pixel lane, in a fixed order
+    const int q0 = int(tid) * cg / 4, nq = cg / 4, lanes = 256 / C4;
+    float t = 0;
+    for (int r = 0; r < lanes; r++)
+      for (int k = 0; k < nq; k++) t += tmp[r * C4 + q0 + k];
+    part[(size_t(n) * p.chunks + chunk) * p.G + tid] = t;
+  }
+}
+
+kernel void gn_reduce(device const float *part [[buffer(0)]],
+                      device float *stats [[buffer(1)]],
+                      constant GnParams &p [[buffer(2)]],
+                      uint gid [[thread_position_in_grid]])
+{
+  const int n = int(gid) / p.G, g = int(gid) % p.G;
+  if (n >= p.N) return;
+  float t = 0;
+  for (int c = 0; c < p.chunks; c++) t += part[(size_t(n) * p.chunks + c) * p.G + g];
+  stats[(n * p.G + g) * 2 + p.pass] = t;
 }
 
 // y = (x - mean) / std * w + b, optionally SiLU, float in -> half out.

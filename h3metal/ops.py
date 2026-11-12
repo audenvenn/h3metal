@@ -177,17 +177,21 @@ def im2col(gpu: Gpu, x: Tensor, col: Tensor, *, N: int, H: int, W: int, C: int, 
 
 def group_norm(gpu: Gpu, x: Tensor, stats: Tensor, w: Tensor, b: Tensor, y: Tensor, *, N: int, HW: int, C: int,
                G: int = 32, eps: float = 1e-6, silu: bool = True, pad_w: int = 0):
-    """y = half(silu?(groupnorm(x))), x float NHWC; stats [N][G][2] float, zeroed by the caller.
-    pad_w: the image's width; y is then the inside of a padded image (conv3x3's input, N = 1)."""
-    if C % (4 * G) or (C // 4) > 256 or 256 % (C // 4) or G > 32:
+    """y = half(silu?(groupnorm(x))), x float NHWC; stats [N][G][2] float (written here; deterministic: no
+    atomics). pad_w: the image's width; y is then the inside of padded images (conv3x3's input)."""
+    if C % (4 * G) or (C // 4) > 256 or 256 % (C // 4) or G > 256:
         raise ValueError(f"group_norm: {C} channels in {G} groups is not supported")
+    chunks = -(-HW // 2048)
+    part = gpu.empty((N, chunks, G), "f32")
     ks = gpu.kernel("ops.metal", "gn_stats")
+    kr = gpu.kernel("ops.metal", "gn_reduce")
     for p in (0, 1):
-        gpu.launch(ks, (-(-HW // 2048), N, 1), (256, 1, 1), [x, stats],
-                   pack("4ifiii", N, HW, C, G, eps, int(silu), p, pad_w or 1))
+        params = pack("4ifiiii", N, HW, C, G, eps, int(silu), p, pad_w or 1, chunks)
+        gpu.launch(ks, (chunks, N, 1), (256, 1, 1), [x, part, stats], params)
+        gpu.launch(kr, (-(-N * G // 64), 1, 1), (64, 1, 1), [part, stats], params)
     ka = gpu.kernel("ops.metal", "gn_apply", PADW=int(pad_w > 0))
     gpu.launch(ka, (-(-C // 256), N * HW, 1), (min(256, C), 1, 1), [x, stats, w, b, y],
-               pack("4ifiii", N, HW, C, G, eps, int(silu), 0, pad_w or 1))
+               pack("4ifiiii", N, HW, C, G, eps, int(silu), 0, pad_w or 1, chunks))
 
 
 def to_half(gpu: Gpu, x: Tensor, y: Tensor, n: int):
