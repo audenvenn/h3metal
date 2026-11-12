@@ -103,21 +103,35 @@ def mrope_angles(pos3: np.ndarray, hd: int, theta: float, section) -> np.ndarray
     return out
 
 
+# Stored integer weights run with either int8 or half-precision activations: the codes are the same.
+HALF_ACT = {"q8": "h8", "q4": "h4", "q4g": "h4g", "h8": "h8", "h4": "h4", "h4g": "h4g"}
+INT8_ACT = {"h8": "q8", "h4": "q4", "h4g": "q4g", "q8": "q8", "q4": "q4", "q4g": "q4g"}
+
+
 class TextEncoder:
-    def __init__(self, gpu: Gpu, wf: WeightFile):
+    def __init__(self, gpu: Gpu, wf: WeightFile, act: str | None = None):
+        """act: "f16" (half-precision activations, the default) or "i8" (rotated int8 activations)."""
         self.gpu, self.wf = gpu, wf
         c = wf.meta["config"]
         self.cfg = c
-        self.fmt = wf.meta["fmt"]
         self.D, self.Hq, self.Hkv, self.hd, self.F = c["hidden"], c["heads"], c["kv_heads"], c["head_dim"], c["ffn"]
         self.L = c["layers"]
         self.embed = wf.host("embed")
+        stored = wf.meta["fmt"]
+        act = act or ("i8" if stored.startswith("q") and os.environ.get("H3METAL_TE_ACT") == "i8" else "f16")
+        if stored in ("f16", "bf16"):
+            act = "f16"
+        self.fmt = (HALF_ACT if act == "f16" else INT8_ACT).get(stored, stored)
         lin = wf.linear
-        self.layers = [{k: lin(f"layers.{l}.{k}") for k in ("qkv", "out", "fc1", "fc2")} |
-                       {k: wf.tensor(f"layers.{l}.{k}") for k in ("mod1", "mod2", "q_norm", "k_norm")}
-                       for l in range(self.L)]
+        self.layers = []
+        for l in range(self.L):
+            ly = {k: lin(f"layers.{l}.{k}") for k in ("qkv", "out", "fc1", "fc2")}
+            for w in ly.values():
+                w.fmt = self.fmt
+            ly |= {k: wf.tensor(f"layers.{l}.{k}") for k in ("mod1", "mod2", "q_norm", "k_norm")}
+            self.layers.append(ly)
         self.ones = wf.tensor("ones")
-        self.half_act = self.fmt.startswith("h") or self.fmt in ("f16", "bf16")
+        self.half_act = act == "f16"
 
     def encode(self, ids, pos3: np.ndarray | None = None, vision: np.ndarray | None = None,
                vision_rows: np.ndarray | None = None, deepstack: list | None = None, profile=None) -> np.ndarray:

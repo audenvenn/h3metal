@@ -99,7 +99,7 @@ def main(argv=None):
     c.add_argument("src", help="the MiniMax-H3-Image directory (transformer/, text_encoder/, vae/, ...)")
     c.add_argument("--out", default=DEFAULT_MODEL)
     c.add_argument("--dit", default="q8", help="q8, q4, q4g or one per matrix: qkv,out,fc1,fc2 (e.g. q8,q8,q4,q4)")
-    c.add_argument("--te", default="h8", help="text encoder format: h8, h4g, q8 or f16")
+    c.add_argument("--te", default="q8", help="text encoder weights: q8, q4g or f16")
     c.add_argument("--vae", default="f16")
     c.add_argument("--only", help="comma-separated subset of vae,vision,te,dit,tokenizer")
     c.set_defaults(func=cmd_convert)

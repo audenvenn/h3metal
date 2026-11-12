@@ -8,11 +8,12 @@ from h3metal.weights import WeightFile
 src = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("H3METAL_REF", "ref") + "/mini_te"
 r = np.load(os.path.join(src, "ref.npz"))
 gpu = Gpu()
-for fmt in ("h8", "q8", "h4", "h4g", "f16"):
+for fmt in ("q8", "q4g", "f16"):
     out = os.path.join(src, f"te_{fmt}.h3m")
     convert_te(src, out, fmt=fmt, layers=3, log=lambda *a: None)
-    te = TextEncoder(gpu, WeightFile(gpu, out))
-    h = te.encode(r["ids"])
-    ref = r["h3"]
-    rel = np.linalg.norm(h - ref) / np.linalg.norm(ref)
-    print(f"{fmt}: hidden_states[3] rel L2 err {rel:.4f}")
+    for act in ("f16", "i8"):
+        te = TextEncoder(gpu, WeightFile(gpu, out), act=act)
+        h = te.encode(r["ids"])
+        ref = r["h3"]
+        rel = np.linalg.norm(h - ref) / np.linalg.norm(ref)
+        print(f"{fmt} weights, {act} activations ({te.fmt}): hidden_states[3] rel L2 err {rel:.4f}")
