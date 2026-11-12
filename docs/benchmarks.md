@@ -76,13 +76,13 @@ would take at peak (scores in int8 at 42.0 TOPS, P V in half precision at
 
 | int8 weights | 2048 x 2048 (4,396 rows) | 4096 x 4096 (16,684 rows) |
 |---|---:|---:|
-| Attention input (Q, K, V) | 27.4 ms, 37.1 TOPS, 88% | 102.7 ms, 37.6 TOPS, 89% |
-| Attention | 28.2 ms, 71% | 392.1 ms, 74% |
-| Attention output | 10.3 ms, 33.0 TOPS, 79% | 41.7 ms, 30.9 TOPS, 73% |
-| MLP up | 37.3 ms, 36.3 TOPS, 86% | 141.0 ms, 36.5 TOPS, 87% |
-| MLP down | 22.2 ms, 30.5 TOPS, 73% | 84.7 ms, 30.4 TOPS, 72% |
-| Norms, rotary embedding, rotations | 6.4 ms | 25.0 ms |
-| Whole block | 132.5 ms, 76% of 100.7 ms | 783.1 ms, 76% of 594.9 ms |
+| Attention input (Q, K, V) | 27.4 ms, 37.1 TOPS, 88% | 106.2 ms, 36.3 TOPS, 86% |
+| Attention | 28.2 ms, 71% | 395.5 ms, 73% |
+| Attention output | 10.3 ms, 33.0 TOPS, 79% | 38.6 ms, 33.3 TOPS, 79% |
+| MLP up | 37.3 ms, 36.3 TOPS, 86% | 140.6 ms, 36.6 TOPS, 87% |
+| MLP down | 22.2 ms, 30.5 TOPS, 73% | 84.9 ms, 30.3 TOPS, 72% |
+| Norms, rotary embedding, rotations | 6.4 ms | 26.1 ms |
+| Whole block | 132.5 ms, 76% of 100.7 ms | 780.4 ms, 76% of 594.9 ms |
 
 With int4 weights the products reach 31.5 TOPS (75%) at 2048 x 2048 and
 31.8 TOPS (76%) at 4096 x 4096: unpacking the 4-bit codes costs time once

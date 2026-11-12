@@ -174,9 +174,9 @@ weights (`bench/dit_layer_bench.py`):
 | | 2048 x 2048 | 4096 x 4096 |
 |---|---:|---:|
 | Matrix products | 34.9 TOPS, 83% of peak | 34.7 TOPS, 83% of peak |
-| Attention (int8 scores, half-precision P V) | 71% of peak | 74% of peak |
+| Attention (int8 scores, half-precision P V) | 71% of peak | 73% of peak |
 | Norms, rotary embedding, rotations | 5% of the time | 3% of the time |
-| Whole block | 132.5 ms, 76% of the floor | 783.1 ms, 76% of the floor |
+| Whole block | 132.5 ms, 76% of the floor | 780.4 ms, 76% of the floor |
 
 The floor is the time the matrix units would need at peak for the block's
 products and attention, with everything else free: 100.7 ms at
