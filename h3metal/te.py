@@ -164,13 +164,7 @@ class TextEncoder:
         rt = g.empty((Tp,), "u8")
         eps = self.cfg["eps"]
         h = self.half_act
-        names = [[f"layers.{i}.{k}" for k in ("qkv", "out", "fc1", "fc2")] for i in range(self.L)]
-        for i in (0, 1):
-            if i < self.L:
-                self.wf.prefetch(names[i])
         for l, ly in enumerate(self.layers):
-            if l + 2 < self.L:  # read two layers ahead: the SSD streams while the GPU computes
-                self.wf.prefetch(names[l + 2])
             ops.norm_mod_q8(g, x, ly["mod1"], rt, a.view((Tp, D)), None if h else sa, T, D, eps=eps, out_hr=h)
             qkv = wide.view((Tp, (Hq + 2 * Hkv) * hd))
             ops.gemm(g, a.view((Tp, D)), ly["qkv"], qkv, T, sa=None if h else sa)

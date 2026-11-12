@@ -143,9 +143,11 @@ memory (`--dit auto`): int8 above 24 GB, int8 attention with int4 MLP at
 24 GB, int4 at 16 GB.
 
 The text encoder is mapped while it runs and released before the transformer
-starts; it, too, commits one layer at a time and reads two layers ahead, so
-its 26 GB of int8 weights stream from the SSD in about 5 seconds (5.2 GB/s)
-with a footprint of about half a gigabyte. Its products take int8 weights
+starts; it, too, commits one layer at a time, so its 26 GB of int8 weights
+stream from the SSD in about 5 seconds with a footprint of about half a
+gigabyte. (Asking the kernel to read the next two layers ahead made it
+slower, 4.9 s instead of 4.2 s for a 300-token prompt: the kernel's own
+read-ahead of a sequential scan does better.) Its products take int8 weights
 with half-precision activations: against the official module run in
 float32, its output (hidden_states[50]) is within 0.37% (relative L2 error,
 mean over nine prompts; mean per-token cosine 0.99996). The int8-activation
