@@ -123,14 +123,18 @@ VAE are the same for all formats.
 
 | `--dit` | Transformer | Chosen on | Error | 1024 x 1024 | 2048 x 2048 |
 |---|---:|---|---:|---:|---:|
-| `q8`: int8 | 20.8 GB | more than 24 GB | 0.13% | TBD | TBD |
-| `mix`: int8 attention, int4 MLP | 14.9 GB | 24 GB | 0.25% | TBD | TBD |
-| `q4`: int4 | 10.8 GB | 16 GB | 0.35% | TBD | TBD |
+| `q8`: int8 | 20.8 GB | more than 24 GB | 0.13% | 36.2 s | 42.1 s |
+| `mix`: int8 attention, int4 MLP | 14.9 GB | 24 GB | 0.25% | 8.6 s | 40.8 s |
+| `q4`: int4 | 10.8 GB | 16 GB | 0.35% | 9.8 s | 43.0 s |
 
-Times are the transformer's six steps on the M6 (24 GB). There int8 does not
-fit in memory: the engine streams its blocks from the SSD while others
-compute, which keeps up at 2048 x 2048 (40.3 s) but not at 1024 x 1024
-(37.8 s, against 12.3 s for `mix`).
+The error is the transformer's against the official module, on random
+weights. Times are its six steps on the M6 (24 GB), generating at exactly
+that size. There int8 does not fit in memory: the engine streams its blocks
+from the SSD while others compute, which keeps up at 2048 x 2048 but not at
+1024 x 1024. Once the products are compute-bound, int4 is a little slower
+than int8 (the 4-bit codes are unpacked before every product): it is for
+memory, not speed. The int4 times were taken with an int4 file derived from
+the int8 one; the kernels are the same.
 
 The text encoder keeps int8 weights with half-precision activations: its
 output is within 0.37% of the official module run in float32 (mean over
