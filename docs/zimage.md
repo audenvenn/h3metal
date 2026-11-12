@@ -39,7 +39,9 @@ What is new:
 
 One block with random weights at the real sizes on the M6 (`bench/zimage_layer_bench.py`) takes 57.8 ms at
 1024 x 1024 (4,224 rows), 79% of the time the matrix units need at their measured peaks, and 362 ms at
-2048 x 2048 (80%). That puts the eight steps at about 15 s at 1024 x 1024.
+2048 x 2048 (80%). On the released weights the eight steps take 15.0 s at 1024 x 1024 and a whole image
+17.4 s from a new prompt (text encoder 0.5-1 s, decoder 0.8 s): 2.1 times faster than mflux
+(docs/benchmarks.md).
 
 Weights stay int8 by default: 6.2 GB, which fits every Mac h3metal runs on. Four-bit weights hurt this
 model more than MiniMax-H3's: every block normalizes its output before adding it, so weight noise is not
@@ -62,12 +64,23 @@ A convolutional decoder:
   convolution;
 - GroupNorm, SiLU, conv_out.
 
+**Half-precision activations in the up blocks.** conv_in and the middle block run at the latents' size and
+keep float activations. The up blocks have up to 64 times as many pixels (a float activation of 256 channels
+is 4.3 GB at 2048 x 2048), so they store theirs in half precision, while GroupNorm, padding and the
+convolutions' residual sum in float. The last convolution stores its 3 channels, not a padded tile of 128,
+and the transformer frees its activations before decoding. h3metal's peak footprint at 2048 x 2048 fell
+from 19.7 GB to 7.8 GB. The decoder became faster (less memory traffic) and its result did not change
+against the bfloat16 reference (57.2 dB on its latents); against the float test model it is 69.5 dB, far
+above an 8-bit image. GroupNorm's statistics are summed in a fixed order, without atomics, so the same seed
+gives the same image bit for bit.
+
 **Convolutions without im2col** (`kernels/conv.metal`). The input is stored with a one-pixel zero border.
 For a fixed tap, the inputs of 64 consecutive output pixels of a row are 64 consecutive pixels of that
 buffer: a plain matrix. So a 3x3 convolution is nine accumulating products whose left operands are views
 into the input, with nothing copied. GroupNorm + SiLU writes straight into the bordered layout, and the
 upsampling writes its bordered output in one pass. Against im2col plus products this takes the decoder from
-1.24 s to 0.86 s at 1024 x 1024 and from 5.9 s to 4.6 s at 2048 x 2048 (random weights). The GroupNorm
+1.24 s to 0.86 s at 1024 x 1024 and from 5.9 s to 4.6 s at 2048 x 2048 (random weights; 0.77 s and 4.0 s
+with the half-precision up blocks). The GroupNorm
 statistics kernel was rewritten along the way: 256-thread threadgroups reading whole rows, instead of one
 thread per threadgroup.
 
@@ -76,6 +89,25 @@ kernel's registers, so its scores are materialized a chunk of query rows at a ti
 P V, all as products on the matrix units. The value bias passes through the softmax (its rows sum to one),
 so it is folded into the output projection's bias. At 1024 x 1024 it costs 0.05 s; at 2048 x 2048
 (65,536 latent pixels) 1.3 s of the 4.6 s.
+
+## Against the official pipeline, on the released weights
+
+`tests/ref/zimage_reference.py` runs diffusers' `ZImagePipeline` on the Mac's GPU in bfloat16, as the model
+card does (the prompt encoded first, so that the text encoder and the transformer need not share the GPU's
+memory). `bench/zimage_quality.py` compares h3metal with it part by part, for "A red fox sitting in fresh snow
+at sunrise, photorealistic, soft golden light.", seed 42, 1024 x 1024:
+
+| Part | Against the bfloat16 reference |
+|---|---|
+| Text encoder rows (int8 weights, half activations) | 2.0% |
+| Transformer, one step from the reference's input and caption rows (int8) | 3.9% |
+| Decoder, on the reference's final latents | 57.2 dB |
+| Whole image, same prompt and noise | 31.3 dB PSNR, SSIM 0.974 |
+
+The reference itself computes in bfloat16, so part of each difference is its own rounding. The two images
+(diffusers left, h3metal right):
+
+![The same prompt and seed: diffusers in bfloat16 (left) and h3metal in int8 (right)](images/zimage_same_seed.jpg)
 
 ## Tests
 
