@@ -102,7 +102,25 @@ and did not pay.
 
 ## Weight formats
 
-TBD
+`h3metal convert` writes the transformer in int8 by default; `--dit mix`
+(int8 attention, int4 MLP) and `--dit q4` make it smaller. Text encoder,
+vision tower and VAE are the same for all of them.
+
+| `--dit` | Transformer | 2048 x 2048, 6 steps (M6, 24 GB) | Quality |
+|---|---:|---:|---|
+| `q8` (default) | 20.8 GB | 40.3 s | TBD |
+| `mix` | 14.9 GB | 42.8 s | TBD |
+
+int8 is the default because it is both the closest to the official
+pipeline and the fastest: on a 24 GB Mac it does not fit in memory, so the
+engine keeps as many blocks resident as fit and streams the rest from the
+SSD while the others compute, and its int8 x int8 products run faster than
+int4's. `mix` stays entirely in memory, which helps on Macs with less memory
+and at small sizes, where a step is too short to hide the SSD.
+
+The text encoder keeps int8 weights with half-precision activations: its
+output is within 0.37% of the official module run in float32 (mean over
+nine prompts; per-token cosine 0.99996).
 
 ## Image quality
 
