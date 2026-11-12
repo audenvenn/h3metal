@@ -6,7 +6,7 @@ results are available after `gpu.wait()`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .gpu import Gpu, Tensor, pack
 
@@ -24,10 +24,11 @@ class QWeight:
     K: int
     G: int = 128
     bias: Tensor | None = None
+    ws: int | None = None  # row stride of the codes in elements, when it differs from K (a slice of K)
 
     @property
     def w_stride(self) -> int:
-        return self.K
+        return self.ws or self.K
 
 
 # Whether the accelerator's register layout is the one the fast group-scale
@@ -41,8 +42,23 @@ def pad_rows(m: int, tile: int = 128) -> int:
 
 def gemm(gpu: Gpu, a: Tensor, wt: QWeight, out: Tensor, M: int, *, sa: Tensor | None = None, epi: int = 0,
          rtype: Tensor | None = None, gate: Tensor | None = None, g_stride: int = 0, c_stride: int | None = None,
-         a_stride: int | None = None, tile=(64, 128, 4), swz: int = 1):
-    """out = A x W^T (epi 0), or out += gate[rtype] * (A x W^T) (epi 1, out float)."""
+         a_stride: int | None = None, tile=(64, 128, 4), swz: int = 1, ksplit: int = 1):
+    """out = A x W^T (epi 0), or out += gate[rtype] * (A x W^T) (epi 1, out float).
+
+    ksplit: accumulate the product in that many dispatches over consecutive slices of K (epi 1 and per-row
+    scales only). Long products run faster this way: each dispatch's working set fits the caches better.
+    """
+    if ksplit > 1:
+        if epi != 1 or wt.fmt not in ("q8", "q4", "h8", "h4") or wt.K % (ksplit * 256):
+            raise ValueError(f"cannot split K of a {wt.fmt} product (epi {epi}, K {wt.K}) {ksplit} ways")
+        kp = wt.K // ksplit
+        per_byte = 2 if wt.fmt in ("q4", "h4") else 1
+        for i in range(ksplit):
+            part = replace(wt, w=wt.w.view((wt.N, kp // per_byte), offset_elems=i * kp // per_byte), K=kp,
+                           ws=wt.w_stride, bias=wt.bias if i == 0 else None)
+            gemm(gpu, a.view((a.shape[0], kp), offset_elems=i * kp), part, out, M, sa=sa, epi=1, rtype=rtype,
+                 gate=gate, g_stride=g_stride, c_stride=c_stride, a_stride=a_stride or wt.K, tile=tile, swz=swz)
+        return
     tm, tn, nsg = tile
     out_t = OUT_DT[out.dtype] if epi == 0 else "float"
     k = gpu.kernel("gemm.metal", "gemm", WFMT=FMT_ID[wt.fmt], EPI=epi, OUT_T=out_t, TM=tm, TN=tn, NSG=nsg,

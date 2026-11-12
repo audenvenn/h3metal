@@ -17,7 +17,7 @@ def pack_int4(q: np.ndarray) -> np.ndarray:
     return (u[:, 0::2] | (u[:, 1::2] << 4)).astype(np.uint8)
 
 
-def check(fmt, M=200, N=256, K=512, epi=0, out_dtype="f16", seed=0, tile=(64, 128, 4)):
+def check(fmt, M=200, N=256, K=512, epi=0, out_dtype="f16", seed=0, tile=(64, 128, 4), ksplit=1):
     rng = np.random.default_rng(seed)
     gpu = Gpu()
     m_pad = (M + 127) // 128 * 128
@@ -76,13 +76,14 @@ def check(fmt, M=200, N=256, K=512, epi=0, out_dtype="f16", seed=0, tile=(64, 12
         X = gpu.upload(x0)
         types = rng.integers(0, 3, size=m_pad).astype(np.uint8)
         gates = rng.standard_normal((3, N)).astype(np.float32)
-        gemm(gpu, A, wt, X, M, sa=SA, epi=1, rtype=gpu.upload(types), gate=gpu.upload(gates))
+        gemm(gpu, A, wt, X, M, sa=SA, epi=1, rtype=gpu.upload(types), gate=gpu.upload(gates), tile=tile,
+             ksplit=ksplit)
         gpu.wait()
         got = X.numpy()[:M].astype(np.float64)
         ref = x0.astype(np.float64) + gates[types][:, :] * ref
     ref = ref[:M]
     err = np.abs(got - ref).max() / (np.abs(ref).max() + 1e-12)
-    print(f"{fmt:4s} epi={epi} out={out_dtype}: max rel err {err:.2e}")
+    print(f"{fmt:4s} epi={epi} out={out_dtype}{f' ksplit={ksplit}' if ksplit > 1 else ''}: max rel err {err:.2e}")
     assert err < (2e-3 if out_dtype != "bf16" else 1e-2), err
 
 
@@ -93,4 +94,7 @@ if __name__ == "__main__":
     check("q8", out_dtype="bf16")
     check("q4g", out_dtype="f32", M=130, N=384, K=1024)
     check("q4g", out_dtype="f32", M=130, N=384, K=1024, tile=(128, 128, 8))
+    for fmt in ("q8", "q4", "h8", "h4"):  # K in two dispatches, accumulated into the residual
+        check(fmt, epi=1, K=1024, ksplit=2)
+    check("q8", epi=1, K=2048, ksplit=4, tile=(64, 256, 8))
     print("ok")

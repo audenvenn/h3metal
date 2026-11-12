@@ -258,13 +258,15 @@ class DiT:
 def _tile(w, M: int = 4096) -> dict:
     """Tile shape and dispatch order per product, from an interleaved sweep on an M6 (bench/gemm_bench.py)."""
     if w.fmt == "q8":
-        if w.K >= 12000:                      # fc2
-            return {"tile": (64, 256, 8)}
+        if w.K >= 12000:                      # fc2, in two dispatches over halves of K
+            return {"tile": (64, 256, 8), "ksplit": 2}
         if w.K >= 7000:                       # attention output
             return {"tile": (64, 256, 8) if M >= 2048 else (32, 128, 2)}
         return {"tile": (64, 256, 8), "swz": 2 if M >= 2048 else 1}   # qkv, fc1
     if w.fmt == "q4":
-        if w.K >= 7000:                       # attention output, fc2
+        if w.K >= 12000:                      # fc2
+            return {"tile": (32, 128, 2), "ksplit": 2}
+        if w.K >= 7000:                       # attention output
             return {"tile": (32, 128, 2)}
         return {"tile": (64, 128, 4), "swz": 4}
     return {"tile": (64, 128, 4)}
