@@ -16,7 +16,7 @@ import numpy as np
 
 from . import dit as ditm
 from .gpu import Gpu
-from .weights import WeightFile, bf16_bits
+from .weights import WeightFile, bf16_bits, bf16_to_f32
 
 MAX_TOKENS = 4096
 DEFAULT_MIN_AREA = 2048 * 2048
@@ -58,9 +58,25 @@ class Pipeline:
     def tokenize(self, prompt: str) -> list[int]:
         return self.tokenizer.encode(prompt, add_special_tokens=False).ids[:MAX_TOKENS]
 
+    def _cache_path(self, key: str) -> str | None:
+        root = os.environ.get("H3METAL_CACHE", os.path.expanduser("~/.h3metal/cache"))
+        if root in ("", "0", "off"):
+            return None
+        import hashlib
+        st = os.stat(self.paths["te"])
+        h = hashlib.sha256(f"{key}|{st.st_size}|{int(st.st_mtime)}".encode()).hexdigest()[:32]
+        return os.path.join(root, f"{h}.npy")
+
     def encode_prompt(self, prompt: str, timing: Timing) -> np.ndarray:
+        """The text encoder's output for a prompt, from memory or the on-disk cache when it was seen before."""
         if prompt in self._te_cache:
             return self._te_cache[prompt]
+        path = self._cache_path("t2i|" + prompt)
+        if path and os.path.exists(path):
+            emb = bf16_to_f32(np.load(path))
+            self._te_cache = {prompt: emb}
+            timing.add("text (cached)", 0.0)
+            return emb
         from .te import TextEncoder
         self.release()
         t = time.time()
@@ -71,6 +87,8 @@ class Pipeline:
         wf.close()
         timing.add("text", time.time() - t)
         self._te_cache = {prompt: emb}
+        if path:
+            _store(path, bf16_bits(emb))
         return emb
 
     def _dit(self, timing: Timing):
@@ -145,6 +163,18 @@ class Pipeline:
         img = self.decode(lat, timing)
         out = to_image(img, width, height)
         return out, timing
+
+
+def _store(path: str, arr: np.ndarray, keep: int = 32):
+    """Writes a cache entry and keeps only the `keep` most recent ones."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp.npy"
+    np.save(tmp, arr)
+    os.replace(tmp, path)
+    entries = sorted((os.path.getmtime(os.path.join(d, f)), f) for f in os.listdir(d) if f.endswith(".npy"))
+    for _, f in entries[:-keep]:
+        os.remove(os.path.join(d, f))
 
 
 def to_image(img: np.ndarray, width: int, height: int) -> np.ndarray:
