@@ -177,14 +177,18 @@ def im2col(gpu: Gpu, x: Tensor, col: Tensor, *, N: int, H: int, W: int, C: int, 
 
 
 def group_norm(gpu: Gpu, x: Tensor, stats: Tensor, w: Tensor, b: Tensor, y: Tensor, *, N: int, HW: int, C: int,
-               G: int = 32, eps: float = 1e-6, silu: bool = True):
-    """y = half(silu?(groupnorm(x))), x float NHWC; stats [N][G][2] float, zeroed by the caller."""
+               G: int = 32, eps: float = 1e-6, silu: bool = True, pad_w: int = 0):
+    """y = half(silu?(groupnorm(x))), x float NHWC; stats [N][G][2] float, zeroed by the caller.
+    pad_w: the image's width; y is then the inside of a padded image (conv3x3's input, N = 1)."""
+    if C % (4 * G) or (C // 4) > 256 or 256 % (C // 4) or G > 32:
+        raise ValueError(f"group_norm: {C} channels in {G} groups is not supported")
     ks = gpu.kernel("ops.metal", "gn_stats")
     for p in (0, 1):
-        gpu.launch(ks, (G, N, -(-HW // 64)), (1, 1, 1), [x, stats], pack("4ifii", N, HW, C, G, eps, int(silu), p))
-    ka = gpu.kernel("ops.metal", "gn_apply")
+        gpu.launch(ks, (-(-HW // 2048), N, 1), (256, 1, 1), [x, stats],
+                   pack("4ifiii", N, HW, C, G, eps, int(silu), p, pad_w or 1))
+    ka = gpu.kernel("ops.metal", "gn_apply", PADW=int(pad_w > 0))
     gpu.launch(ka, (-(-C // 256), N * HW, 1), (min(256, C), 1, 1), [x, stats, w, b, y],
-               pack("4ifii", N, HW, C, G, eps, int(silu), 0))
+               pack("4ifiii", N, HW, C, G, eps, int(silu), 0, pad_w or 1))
 
 
 def to_half(gpu: Gpu, x: Tensor, y: Tensor, n: int):
@@ -218,3 +222,29 @@ def softmax_rows(gpu: Gpu, s: Tensor, p: Tensor, M: int, L: int, *, valid: int |
     """p[m] = half(softmax(scale * s[m][:valid])), zeros beyond valid; s float [M][L], p half [M][L]."""
     k = gpu.kernel("ops.metal", "softmax_rows", NSG=8)
     gpu.launch(k, (M, 1, 1), (256, 1, 1), [s, p], pack("3if", M, L, valid or L, scale))
+
+
+def conv3x3(gpu: Gpu, xp: Tensor, wt: QWeight, out: Tensor, *, H: int, W: int, C: int, epi: int = 0,
+            tile=(64, 128, 4)):
+    """out[H*W][N] = 3x3 convolution of a padded half image xp [(H+2)][(W+2)][C] (kernels/conv.metal; epi 1:
+    out += ...). wt: [N][9C] half, taps (ky, kx, c), with a bias."""
+    tm, tn, nsg = tile
+    if C % 32 or wt.N % tn or wt.bias is None:
+        raise ValueError(f"conv3x3: {C} input channels, {wt.N} outputs, bias {wt.bias is not None}")
+    out_t = OUT_DT[out.dtype] if epi == 0 else "float"
+    k = gpu.kernel("conv.metal", "conv3x3", TM=tm, TN=tn, NSG=nsg, EPI=epi, OUT_T=out_t)
+    gpu.launch(k, (wt.N // tn, H * -(-W // tm), 1), (32 * nsg, 1, 1), [xp, wt.w, out, wt.bias],
+               pack("5i", H, W, C, wt.N, wt.K))
+
+
+def pad_half(gpu: Gpu, x: Tensor, xp: Tensor, *, H: int, W: int, C: int, up: int = 1):
+    """xp = the padded half image of x [H/up][W/up][C] (float) upsampled up times by nearest neighbour."""
+    k = gpu.kernel("conv.metal", "pad_half")
+    n = (H + 2) * (W + 2) * (C // 4)
+    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, xp], pack("4i", H, W, C, up))
+
+
+def zero_border(gpu: Gpu, xp: Tensor, *, H: int, W: int, C: int):
+    k = gpu.kernel("conv.metal", "zero_border")
+    n = (2 * (W + 2) + 2 * H) * (C // 4)
+    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [xp], pack("4i", H, W, C, 1))

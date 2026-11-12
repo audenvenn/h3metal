@@ -4,9 +4,10 @@ A convolutional decoder: conv_in, a middle block (ResNet block, single-head self
 pixels, ResNet block), four up blocks of three ResNet blocks each (the first three end in a 2x nearest
 upsampling and a convolution), GroupNorm + SiLU and conv_out.
 
-On the engine every convolution is an im2col pass plus a half-precision product on the matrix units, run in
-horizontal stripes so that the im2col buffer stays near STRIPE_BYTES; the upsampling is folded into the next
-convolution's im2col (it reads the source pixel of every upsampled one). GroupNorm + SiLU is one pass. The
+On the engine the 3x3 convolutions run as nine accumulating half-precision products per output tile whose
+left operands are views into the input stored with a one-pixel zero border (kernels/conv.metal): GroupNorm +
+SiLU writes straight into that layout, and the 2x upsampling writes its padded output in one pass. Only
+conv_in (16 input channels) goes through im2col. The
 attention has one head of 512 channels, too wide for the flash-attention kernel's registers, so its scores
 are materialized a chunk of query rows at a time: Q K^T, a row softmax, P V, all on the matrix units.
 """
@@ -26,6 +27,7 @@ from .st import SafeTensors
 from .weights import WeightFile, Writer
 
 STRIPE_BYTES = 256 << 20
+CONV_TILE = (64, 128, 8)  # conv3x3: output pixels and channels per threadgroup, SIMD-groups (swept on an M6)
 
 
 def convert_flux_vae(src: str, out: str, log=print):
@@ -106,6 +108,7 @@ class FluxVAEDecoder:
         self.conv_out = conv("decoder.conv_out")
         self._scratch = {}
         self._ones = {}
+        self.conv_tile = CONV_TILE
 
     # -- helpers -----------------------------------------------------------------------------------------------
     # The matrix-product kernel runs whole 64-row tiles: every [rows][channels] buffer has room for the padded
@@ -155,6 +158,33 @@ class FluxVAEDecoder:
             else:
                 ops.gemm(g, col, wt, o, n * W)
 
+    def _pbuf(self, role: str, H: int, W: int, C: int) -> Tensor:
+        """A padded half image [(H + 2)(W + 2) + slack][C] (conv3x3 reads up to a tile past the last row)."""
+        n = (H + 2) * (W + 2) + 128
+        need = n * C * 2
+        cur = self._scratch.get(role)
+        if cur is None or cur.buf.nbytes < need:
+            if cur is not None:
+                self.gpu.wait()
+            cur = self.gpu.empty((need // 2,), "f16")
+            self._scratch[role] = cur
+        return Tensor(cur.buf, 0, (n, C), "f16")
+
+    def _gn_pad(self, x: Tensor, H: int, W: int, C: int, nb, role: str = "gnp") -> Tensor:
+        """GroupNorm + SiLU of x [H*W][C] into a padded half image (a conv3x3 input)."""
+        g = self.gpu
+        xp = self._pbuf(role, H, W, C)
+        ops.zero_border(g, xp, H=H, W=W, C=C)
+        stats = g.empty((1, self.G, 2), "f32")
+        stats.numpy()[...] = 0
+        ops.group_norm(g, x, stats, nb[0], nb[1], xp, N=1, HW=H * W, C=C, G=self.G, eps=1e-6, pad_w=W)
+        return xp
+
+    def _conv3(self, xp: Tensor, H: int, W: int, cw, out: Tensor, accumulate: bool = False):
+        wt, k, cin, cout = cw
+        tile = self.conv_tile if wt.N % self.conv_tile[1] == 0 else (64, 128, 4)
+        ops.conv3x3(self.gpu, xp, wt, out, H=H, W=W, C=cin, epi=1 if accumulate else 0, tile=tile)
+
     def _gn(self, x: Tensor, HW: int, C: int, nb, out: Tensor, silu: bool = True):
         g = self.gpu
         stats = g.empty((1, self.G, 2), "f32")
@@ -167,10 +197,10 @@ class FluxVAEDecoder:
         g = self.gpu
         HW = H * W
         cout = r["c1"][3]
-        hn = self._gn(x, HW, C, r["n1"], self._buf("gn", (HW, C), "f16"))
+        hn = self._gn_pad(x, H, W, C, r["n1"])
         h1 = self._buf("h1", (HW, cout), "f32")
-        self._conv(hn, H, W, r["c1"], h1)
-        h1n = self._gn(h1, HW, cout, r["n2"], self._buf("gn", (HW, cout), "f16"))
+        self._conv3(hn, H, W, r["c1"], h1)
+        h1n = self._gn_pad(h1, H, W, cout, r["n2"])
         if "sc" in r:
             xs = self._buf("half", (HW, C), "f16")
             ops.to_half(g, x, xs, HW * C)
@@ -179,7 +209,7 @@ class FluxVAEDecoder:
             self._conv(xs, H, W, r["sc"], out)
         else:
             out = x
-        self._conv(h1n, H, W, r["c2"], out, accumulate=True)
+        self._conv3(h1n, H, W, r["c2"], out, accumulate=True)
         return out, cout, role
 
     def _attention(self, x: Tensor, H: int, W: int, C: int):
@@ -228,16 +258,16 @@ class FluxVAEDecoder:
             for r in res:
                 x, C, role = self._resnet(r, x, role, H, W, C)
             if up is not None:
-                xs = self._buf("half", (H * W, C), "f16")
-                ops.to_half(g, x, xs, H * W * C)
                 H, W = 2 * H, 2 * W
+                xp = self._pbuf("upp", H, W, C)
+                ops.pad_half(g, x, xp, H=H, W=W, C=C, up=2)
                 role = other(role)
                 x = self._buf(role, (H * W, C), "f32")
-                self._conv(xs, H, W, up, x, up2=True)
+                self._conv3(xp, H, W, up, x)
             g.commit()
-        hn = self._gn(x, H * W, C, self.norm_out, self._buf("gn", (H * W, C), "f16"))
+        hn = self._gn_pad(x, H, W, C, self.norm_out)
         img = self._buf("img", (H * W, self.conv_out[0].N), "f32")
-        self._conv(hn, H, W, self.conv_out, img)
+        self._conv3(hn, H, W, self.conv_out, img)
         g.wait()
         return img.numpy()[:H * W, :3].reshape(H, W, 3).copy()
 

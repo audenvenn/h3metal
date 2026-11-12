@@ -519,31 +519,48 @@ kernel void im2col(device const half *x [[buffer(0)]],
 
 // GroupNorm statistics per image and group, in two passes: pass 0 sums the values, pass 1 the squared
 // deviations from the mean pass 0 found. stats[n][g] = (sum, sum of squared deviations).
-struct GnParams { int N, HW, C, G; float eps; int silu; int pass; };
+struct GnParams { int N, HW, C, G; float eps; int silu; int pass; int W; };
+#ifndef PADW
+#define PADW 0  // gn_apply: write into an image with a one-pixel zero border (the input of a conv3x3), N = 1
+#endif
+#define GN_CHUNK 2048
 
 kernel void gn_stats(device const float *x [[buffer(0)]],
                      device atomic_float *stats [[buffer(1)]],
                      constant GnParams &p [[buffer(2)]],
-                     uint3 gid [[thread_position_in_grid]])
+                     uint2 tg [[threadgroup_position_in_grid]],
+                     ushort tid [[thread_index_in_threadgroup]],
+                     ushort lane [[thread_index_in_simdgroup]])
 {
-  // thread: (channel group, image, a run of 64 pixels)
-  const int g = int(gid.x), n = int(gid.y), p0 = int(gid.z) * 64;
-  if (g >= p.G || n >= p.N || p0 >= p.HW) return;
-  const int cg = p.C / p.G;
+  // One threadgroup of 256 threads per run of GN_CHUNK pixels of one image. Thread t reads channels
+  // 4 (t % C4) .. +3 of every (256 / C4)-th pixel, so a SIMD-group reads whole rows (coalesced); the four
+  // channels of a float4 always share a group (groups hold multiples of four channels). Partial sums meet in
+  // threadgroup memory, then one atomic per group goes to the device.
+  threadgroup atomic_float part[32];
+  const int n = int(tg.y), px0 = int(tg.x) * GN_CHUNK;
+  const int C4 = p.C / 4, cg = p.C / p.G;
+  if (tid < p.G) atomic_store_explicit(&part[tid], 0.0f, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const int q = tid % C4, g = q * 4 / cg;
   float mean = 0;
   if (p.pass == 1) {
     device const float *st = (device const float *)stats;
     mean = st[(n * p.G + g) * 2] / float(p.HW * cg);
   }
+  const device float4 *x4 = (const device float4 *)x + size_t(n) * p.HW * C4;
   float s = 0;
-  for (int px = p0; px < min(p0 + 64, p.HW); px++) {
-    const device float *row = x + (size_t(n) * p.HW + px) * p.C + g * cg;
-    for (int c = 0; c < cg; c++) {
-      const float v = row[c] - mean;
-      s += p.pass == 1 ? v * v : v;
-    }
+  const int end = min(px0 + GN_CHUNK, p.HW);
+  for (int px = px0 + tid / C4; px < end; px += 256 / C4) {
+    const float4 v = x4[size_t(px) * C4 + q] - mean;
+    s += p.pass == 1 ? dot(v, v) : (v.x + v.y) + (v.z + v.w);
   }
-  atomic_fetch_add_explicit(&stats[(n * p.G + g) * 2 + p.pass], s, memory_order_relaxed);
+  // Lanes of a SIMD-group that share a group (C4 >= 32: all lanes read neighbouring channel quads) add first.
+  if (cg >= 128) s = simd_sum(s);
+  if (cg < 128 || lane == 0) atomic_fetch_add_explicit(&part[g], s, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tid < p.G)
+    atomic_fetch_add_explicit(&stats[(n * p.G + tid) * 2 + p.pass], atomic_load_explicit(&part[tid], memory_order_relaxed),
+                              memory_order_relaxed);
 }
 
 // y = (x - mean) / std * w + b, optionally SiLU, float in -> half out.
@@ -563,7 +580,12 @@ kernel void gn_apply(device const float *x [[buffer(0)]],
   const float var = sums[(n * p.G + g) * 2 + 1] / cnt;
   float v = (x[size_t(pix) * p.C + c] - mean) * rsqrt(var + p.eps) * w[c] + b[c];
   if (p.silu) v = v / (1.0f + exp(-v));
+#if PADW
+  const int yy = pix / p.W, xx = pix % p.W;
+  y[(size_t(yy + 1) * (p.W + 2) + xx + 1) * p.C + c] = half(v);
+#else
   y[size_t(pix) * p.C + c] = half(v);
+#endif
 }
 
 // y = half(x), n elements.
