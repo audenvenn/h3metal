@@ -1,0 +1,11 @@
+name: Feature request
+description: Something h3metal should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What and why
+      description: What you would like h3metal to do, and what you need it for.
+    validations:
+      required: true

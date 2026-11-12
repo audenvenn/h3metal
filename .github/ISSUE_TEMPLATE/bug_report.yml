@@ -1,0 +1,36 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got instead. Paste the full output.
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: Chip, memory and macOS version (`h3metal info` prints the first two).
+      placeholder: Apple M6 · 24 GB · macOS 27.2
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: h3metal version or commit
+      placeholder: 0.1.0 / 28d979f
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Weights
+      description: How the model files were made (`h3metal info` lists their formats).
+      placeholder: converted with h3metal convert --dit q4
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else

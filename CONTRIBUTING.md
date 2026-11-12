@@ -1,0 +1,74 @@
+# Contributing to h3metal
+
+Thanks for looking. The goal is narrow: run MiniMax-H3-Image on one Apple
+Silicon Mac as fast as the hardware allows, at the image quality of the
+official pipeline, and say exactly how fast and how close that is.
+Contributions that serve that goal are welcome.
+
+## Ground rules
+
+- **English only.** Code, comments, documentation, commit messages, issues and
+  pull requests are in English. CI checks the repository for this.
+- **Measured claims.** A statement about speed, memory or quality comes with
+  the machine, the commands and the numbers. Speed is measured back to back
+  against the baseline, with nothing else using the GPU.
+- **Quality is measured against the official pipeline.** A change to the
+  numerics (kernels, formats, conversion) comes with `bench/quality.py`
+  results against a reference run (`tests/ref/reference.py`).
+- **One change per pull request**, and one change per measurement.
+
+## Setting up
+
+```sh
+cmake -S . -B build/cmake -G Ninja && cmake --build build/cmake
+python3 -m venv .venv && .venv/bin/pip install -e ".[edit]"
+```
+
+The Metal kernels in `kernels/` are compiled at run time, so editing a
+kernel needs no rebuild; editing `src/` does.
+
+## Tests
+
+| What | Needs | Command |
+|---|---|---|
+| Conversion numerics, file format, layouts | nothing | `python tests/test_convert.py` |
+| Matrix products, attention, row kernels against NumPy | GPU | `python tests/test_gemm.py`, `tests/test_attention.py`, `tests/test_ops.py` |
+| Transformer and text encoder against the official modules, random weights | GPU; a torch + diffusers + transformers environment for the reference side | `tests/ref/mini_dit.py`, `tests/ref/mini_te.py`, then `tests/test_dit_mini.py`, `tests/test_te_mini.py` |
+| VAE and the edit-only parts against the official modules, real weights | GPU, the official checkpoint, the reference environment | `tests/ref/vae_decode.py`, `tests/ref/edit_parts.py`, then `tests/test_vae.py`, `tests/test_edit_parts.py` |
+| Image quality against the official pipeline | GPU, checkpoint, reference environment | `tests/ref/reference.py`, then `bench/quality.py` |
+| Speed | idle GPU, converted model | `bench/dit_layer_bench.py`, `bench/gemm_bench.py`, `bench/attn_bench.py` |
+
+The reference scripts import diffusers' weight conversion script; point
+`DIFFUSERS_SCRIPTS` at the `scripts/` directory of a diffusers checkout.
+`H3METAL_WEIGHTS` names the official checkpoint and `H3METAL_REF` a working
+directory for reference outputs.
+
+CI runs the first row, byte-compiles the Python sources and checks the
+English-only rule. It cannot run the GPU tests, so say in the pull request
+which of them you ran and on what machine.
+
+## Workflow
+
+1. For anything larger than a fix, open an issue first and describe what you
+   want to change and why.
+2. Branch from `main`. `main` is protected: changes arrive through pull
+   requests, CI has to pass, and pull requests are squash-merged.
+3. Write commit and pull-request titles in the imperative ("Add ...", "Fix
+   ..."), 72 characters or fewer. In the body, say what changed and what was
+   measured or verified.
+4. Add an entry under "Unreleased" in `CHANGELOG.md` if users will notice.
+
+## Releases
+
+- Versions follow [Semantic Versioning](https://semver.org). The version lives
+  in `pyproject.toml` and `h3metal/__init__.py`.
+- A release is a tag `vX.Y.Z` on `main` with the matching `CHANGELOG.md`
+  section as its notes.
+
+## The model's license
+
+MiniMax-H3-Image is licensed separately from this code, under the
+MiniMax-H3-Image Community License Agreement, which limits where and how the
+model and its derivatives may be used and distributed. Converted weight files
+are derivatives of the model: anything that distributes them must follow that
+license (see the README).
