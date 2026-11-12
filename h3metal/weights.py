@@ -59,15 +59,25 @@ class Writer:
         self.pos = DATA_START
         self.entries: dict[str, dict] = {}
         self.meta = meta
+        self.gaps: list[list[int]] = []  # [start, end) left free before chunk boundaries, filled by later tensors
 
     def _place(self, nbytes: int, host_only: bool = False) -> int:
-        pos = (self.pos + ALIGN - 1) // ALIGN * ALIGN
-        if host_only:
-            return pos
-        if nbytes > CHUNK:
-            raise ValueError(f"tensor of {nbytes} bytes exceeds the {CHUNK}-byte chunk")
-        if pos // CHUNK != (pos + nbytes - 1) // CHUNK:
-            pos = (pos // CHUNK + 1) * CHUNK
+        def up(x):
+            return (x + ALIGN - 1) // ALIGN * ALIGN
+        if not host_only:
+            if nbytes > CHUNK:
+                raise ValueError(f"tensor of {nbytes} bytes exceeds the {CHUNK}-byte chunk")
+            for gap in self.gaps:  # first fit into space skipped at an earlier chunk boundary
+                start = up(gap[0])
+                if start + nbytes <= gap[1]:
+                    gap[0] = start + nbytes
+                    return start
+        pos = up(self.pos)
+        if not host_only and pos // CHUNK != (pos + nbytes - 1) // CHUNK:
+            boundary = (pos // CHUNK + 1) * CHUNK
+            self.gaps.append([pos, boundary])
+            pos = boundary
+        self.pos = pos + nbytes
         return pos
 
     def _write(self, data: np.ndarray, host_only: bool = False) -> dict:
@@ -75,7 +85,6 @@ class Writer:
         pos = self._place(raw.nbytes, host_only)
         self.f.seek(pos)
         self.f.write(raw.tobytes() if raw.nbytes < (64 << 20) else memoryview(raw))
-        self.pos = pos + raw.nbytes
         return {"offset": pos, "nbytes": int(raw.nbytes)}
 
     def tensor(self, name: str, data: np.ndarray, dtype: str, host_only: bool = False):
