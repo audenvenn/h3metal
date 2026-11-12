@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Attention with int8 scores is about 10% faster from 2048 x 2048 up (5% at
+  1024 x 1024): the softmax updates its running maximum only when a score
+  exceeds it by more than 8 (log2 units), keeps per-lane row sums and applies
+  the query scale in the exponent's fused multiply-add, and a threadgroup now
+  holds ten SIMD-groups instead of sixteen. A transformer block runs at 80%
+  of the matrix units' floor instead of 76%; a 4096 x 4096 image takes 236 s
+  instead of 244 s.
+
+### Fixed
+
+- The documentation blamed the softmax's vector work for what attention
+  leaves on the table; measurements show it is the barrier after every block
+  of keys (docs/design.md).
+
 ## [0.1.0] - 2026-11-13
 
 ### Added

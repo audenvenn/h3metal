@@ -48,12 +48,19 @@ light.", seed 42. Means of two runs (one at 4096 x 4096):
 | Size | h3metal | h3-image-mlx | Speed-up | h3metal peak footprint | h3-image-mlx peak footprint |
 |---|---:|---:|---:|---:|---:|
 | 1024 x 1024 | 10.1 s | 45.7 s | 4.5x | 0.6 GB | 2.5 GB |
-| 2048 x 2048 | 41.2 s | 115.4 s | 2.8x | 2.6 GB | 2.9 GB |
+| 2048 x 2048 | 40.6 s | 115.4 s | 2.8x | 2.6 GB | 2.9 GB |
 | 2048 x 2048, new prompt | 46.5 s | 118.1 s | 2.5x | 2.6 GB | 2.9 GB |
-| 4096 x 4096 | 244.2 s | 458.3 s | 1.9x | 5.4 GB | 6.9 GB |
+| 4096 x 4096 | 236.4 s | 458.3 s | 1.9x | 5.4 GB | 6.9 GB |
 
-Single runs: h3metal 11.0 and 9.2 s at 1024 x 1024, 40.8 and 41.5 s at
+Single runs: h3metal 11.0 and 9.2 s at 1024 x 1024, 40.6 and 40.6 s at
 2048 x 2048; h3-image-mlx 45.7 and 45.7 s, 115.3 and 115.5 s.
+
+The h3metal times at 2048 x 2048 (repeated prompt) and 4096 x 4096 are from
+after the attention changes (2026-11-13), measured the same way against
+0.1.0 itself, run by run in turn: 0.1.0 took 41.3 and 41.1 s at
+2048 x 2048, as in the comparison above (40.8 and 41.5 s), and 243.9 s at
+4096 x 4096 (244.2 s above). The other figures are from the 0.1.0
+comparison (2026-11-12), where attention is a small part of the time.
 
 With int8 weights throughout, like h3-image-mlx's, h3metal takes 44.9 and
 45.0 s at 2048 x 2048 (2.6x). Those two runs were made on their own right
@@ -97,24 +104,30 @@ first that skipped part of the work (see docs/design.md), and
 shapes.
 
 One transformer block, `FMT=q8 python bench/dit_layer_bench.py 2048` (and
-4096): the block time is the best of three runs, the kernels' times come
-from one profiled run, and repeated runs vary by a few percent. Products
+4096): each run of the script reports the best of three block times and
+one profiled run's kernel times, and repeated runs vary by a few percent. Products
 are compared with the int8 peak; attention with the time its two products
 would take at peak (scores in int8 at 42.0 TOPS, P V in half precision at
 20.6 TFLOPS); the block with the sum of those, its floor.
 
 | int8 weights | 2048 x 2048 (4,396 rows) | 4096 x 4096 (16,684 rows) |
 |---|---:|---:|
-| Attention input (Q, K, V) | 27.4 ms, 37.1 TOPS, 88% | 106.2 ms, 36.3 TOPS, 86% |
-| Attention | 28.2 ms, 71% | 395.5 ms, 73% |
-| Attention output | 10.3 ms, 33.0 TOPS, 79% | 38.6 ms, 33.3 TOPS, 79% |
-| MLP up | 37.3 ms, 36.3 TOPS, 86% | 140.6 ms, 36.6 TOPS, 87% |
-| MLP down | 22.2 ms, 30.5 TOPS, 73% | 84.9 ms, 30.3 TOPS, 72% |
-| Norms, rotary embedding, rotations | 6.4 ms | 26.1 ms |
-| Whole block | 132.5 ms, 76% of 100.7 ms | 780.4 ms, 76% of 594.9 ms |
+| Attention input (Q, K, V) | 27.1 ms, 37.5 TOPS, 89% | 101.9 ms, 37.9 TOPS, 90% |
+| Attention | 24.8 ms, 81% | 339.6 ms, 85% |
+| Attention output | 10.2 ms, 33.1 TOPS, 79% | 37.9 ms, 34.0 TOPS, 81% |
+| MLP up | 36.3 ms, 37.3 TOPS, 89% | 149.6 ms, 34.4 TOPS, 82% |
+| MLP down | 22.3 ms, 30.4 TOPS, 72% | 83.8 ms, 30.7 TOPS, 73% |
+| Norms, rotary embedding, rotations | 6.4 ms | 24.4 ms |
+| Whole block | 128.1 ms, 79% of 100.7 ms | 735.8 ms, 81% of 594.9 ms |
 
-With int4 weights the products reach 31.5 TOPS (75%) at 2048 x 2048 and
+Every figure is the median of three runs of the script (blocks of
+127.9-128.3 ms and 729.2-743.3 ms; single kernels vary more, the MLP up
+product at 4096 x 4096 from 148 to 155 ms). In 0.1.0, before the attention
+changes in docs/design.md, the block took 132.5 ms (76%) and 780.4 ms
+(76%), attention 28.2 ms (71%) and 395.5 ms (73%).
+
+With int4 weights the products reach 31.9 TOPS (76%) at 2048 x 2048 and
 31.8 TOPS (76%) at 4096 x 4096: unpacking the 4-bit codes costs time once
-a product is compute-bound. A whole block takes 141.5 ms (71% of its floor)
-and 816.1 ms (73%). The default format on a 24 GB Mac, int8 attention with
+a product is compute-bound. A whole block takes 137.7 ms (73% of its floor)
+and 776.3 ms (77%). The default format on a 24 GB Mac, int8 attention with
 int4 MLP, sits in between.

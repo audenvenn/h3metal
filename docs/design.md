@@ -65,9 +65,9 @@ comparison of the weight formats on real weights showed it. Now
 its real shapes and sizes, and `ops.gemm` refuses tiles wider than 256
 columns.
 
-At 2048 x 2048 a whole int8 block takes 132 ms, 76% of the time the matrix
-units would need at their measured peaks. The four products take 73% of the
-block at 34.9 TOPS (83% of the int8 peak), attention 21%, and the norms,
+At 2048 x 2048 a whole int8 block takes 128 ms, 79% of the time the matrix
+units would need at their measured peaks. The four products take 75% of the
+block at 35.3 TOPS (84% of the int8 peak), attention 19%, and the norms,
 rotary embedding and rotations the remaining 5%. With int4 weights the
 products reach 31.5 TOPS, since unpacking the 4-bit codes costs time once
 the products are compute-bound; int4 pays where memory is short, not in
@@ -106,9 +106,11 @@ The transformer runs the score product in int8: the kernel that applies the
 query/key norms and the rotary embedding also quantizes every query and key
 row to int8 with its own scale, the scores accumulate in int32 at twice the
 half-precision rate, and the two scales are applied to each block of scores
-before the softmax. P V stays in half precision. A layer's attention takes
-29.6 ms instead of 37.5 ms at 2048 x 2048 and 0.46 s instead of 0.56 s at
-4096 x 4096, where attention is half of a block's time.
+before the softmax. P V stays in half precision. With the changes below, a
+layer's attention takes 24.8 ms at 2048 x 2048 and 0.34 s at 4096 x 4096,
+where attention is almost half of a block's time: 81% and 85% of the time
+the matrix units need for the two products at their measured peaks
+(37.5 ms and 0.56 s with half-precision scores and none of the changes).
 
 P V in int8 does not pay on this GPU. With V in int8 (one scale per row)
 and each block of probabilities quantized per row against its largest
@@ -116,9 +118,8 @@ value, the result stays within 1% of the float product, but the extra work
 per score (the V scales, the block maximum, the rounding, the scaling back
 into the float output) costs more than the faster product saves: 32.2 ms
 instead of 29.9 ms per layer at 2048 x 2048, 0.48 s instead of 0.45 s at
-4096 x 4096. The attention is bound by vector work, not by the matrix
-units. (The matrix units also reject unsigned 8-bit operands in registers,
-which would have halved the probabilities' rounding error.)
+4096 x 4096. (The matrix units also reject unsigned 8-bit operands in
+registers, which would have halved the probabilities' rounding error.)
 
 Keys and values are double-buffered in threadgroup memory: each thread loads
 its share of the next block into registers before the current block's
@@ -133,6 +134,45 @@ rows per SIMD-group so that every key and value fragment feeds two products
 (register pressure: 2-5x slower), and accumulating each block's P V in half
 precision (the matrix units multiply half x half -> half no faster than
 half x half -> float: 18.7 against 19.2 TFLOPS).
+
+What holds the kernel back is the barrier at the end of every block, not
+the products or the softmax. Timing variants that compute wrong results on
+purpose shows it, at 2048 x 2048 with int8 scores: with the staging and its
+barrier removed (every block reads the first block's keys and values), the
+two products alone run at 97% of the matrix units' peaks and the whole
+kernel at 88%; the barrier alone costs 8%, and the global loads and stores
+cost nothing without the barrier but another 11% with it. A barrier makes
+all SIMD-groups of a threadgroup wait for the slowest one's loads, and
+lines them up so that they all start the latency-bound score product at
+once (one int8 product of 16 x 32 x 16 needs dozens of others in flight to
+keep the matrix units busy). Metal has no barrier that only some
+SIMD-groups wait at, nor asynchronous copies into threadgroup memory.
+
+Two changes recover part of it. The softmax does less vector work per
+score (`VX`): each lane takes the maximum of its own scores first and
+compares it with the running maximum; only when a score exceeds that by
+more than 8 (in log2 units) do the four lanes of a row exchange their
+maxima and the output get rescaled, so P V sees probabilities up to 2^8,
+which half precision holds without loss of relative precision. The
+query's scale moves into the exponent's fused multiply-add, and every lane
+keeps its own partial row sums until the end. On its own this is 1-2%
+faster, but it needs fewer registers, and with it ten SIMD-groups per
+threadgroup (160 query rows) beat sixteen: 24.9 ms instead of 27.3 ms per
+layer at 2048 x 2048 and 0.35 s instead of 0.39 s at 4096 x 4096 (10%),
+5% at 1024 x 1024. Without the leaner softmax, ten SIMD-groups gain 5%.
+Nine are slower than sixteen and eight, eleven and twelve are between, so
+this is a matter of how the threadgroups pack onto the GPU's cores; it may
+differ on other chips. The outputs are as accurate as before: on the
+captured inputs of real transformer layers every variant lands within
+1.66e-3 of float64 attention, the rounding of the bf16 output.
+
+Also tried, and slower: each SIMD-group reading its keys and values
+straight from device memory instead of threadgroup memory, which removes
+the barriers (3-4x slower: the cache does not serve 16 SIMD-groups reading
+the same rows); loading two blocks ahead; storing the next block right
+after the score product instead of at the end of the block; and splitting
+the score product into two or four independent accumulator chains
+(registers again).
 
 ## Memory
 
