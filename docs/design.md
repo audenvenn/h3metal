@@ -48,6 +48,13 @@ software. The product's epilogue applies the two scales and, for the
 attention output and the MLP, the gated residual update directly to the
 float residual stream.
 
+The MLP's second product (K = 14,336) runs as two dispatches over halves of
+K, both accumulating into the residual stream: exact, and each dispatch's
+working set fits the caches better (22.9 ms instead of 27.6 ms at
+2048 x 2048 in int8). At that size a whole block takes 143 ms: the four
+products 73% (33 TOPS on average), attention 22%, and the norms, rotary
+embedding and rotations the remaining 5%.
+
 ### Rotation
 
 Int8 activations lose precision when a few channels are much larger than the
