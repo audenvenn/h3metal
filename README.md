@@ -233,7 +233,9 @@ it.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Measured claims only: a change to
-speed or numerics comes with the numbers and how they were taken.
+speed or numerics comes with the numbers and how they were taken. To bring
+another model to the engine, [docs/engine.md](docs/engine.md) lists its
+parts and the steps Z-Image took.
 
 ## Acknowledgements
 
