@@ -1,0 +1,42 @@
+[build-system]
+# setup.py compiles the GPU runtime library with CMake and Ninja (see there).
+requires = ["setuptools>=68", "cmake>=3.24", "ninja"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "h3metal"
+version = "0.1.0"
+description = "MiniMax-H3-Image (text-to-image and editing) on Apple Silicon, with its own Metal engine for the GPU neural accelerators."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "h3metal contributors" }]
+requires-python = ">=3.10"
+keywords = ["apple-silicon", "metal", "diffusion", "text-to-image", "image-editing", "minimax-h3-image", "inference"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Environment :: GPU",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["numpy", "tokenizers", "pillow"]
+
+[project.optional-dependencies]
+# Image editing runs the vision tower and the VAE encoder on MLX.
+edit = ["mlx>=0.30"]
+
+[project.urls]
+Homepage = "https://github.com/audenvenn/h3metal"
+Issues = "https://github.com/audenvenn/h3metal/issues"
+Changelog = "https://github.com/audenvenn/h3metal/blob/main/CHANGELOG.md"
+
+[project.scripts]
+h3metal = "h3metal.cli:main"
+
+[tool.setuptools]
+packages = ["h3metal"]

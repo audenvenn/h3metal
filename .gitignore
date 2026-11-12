@@ -1,0 +1,17 @@
+# local environments and build output
+.venv/
+build/
+__pycache__/
+*.pyc
+.DS_Store
+
+# model weights and converted files are never committed
+models/
+*.safetensors
+*.h3m
+*.h3m.partial
+*.npz
+
+# python packaging
+*.egg-info/
+dist/
