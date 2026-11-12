@@ -181,3 +181,16 @@ def group_norm(gpu: Gpu, x: Tensor, stats: Tensor, w: Tensor, b: Tensor, y: Tens
 def to_half(gpu: Gpu, x: Tensor, y: Tensor, n: int):
     k = gpu.kernel("ops.metal", "to_half")
     gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, y], pack("i", n))
+
+
+def vit_qkv_rope(gpu: Gpu, qkv: Tensor, cos: Tensor, sin: Tensor, Q: Tensor, K: Tensor, V: Tensor, *, N: int, H: int,
+                 hd: int, hdp: int, rows: int):
+    """Vision tower: split qkv [N][3][H][hd] into Q, K, V [H][rows][hdp] (half, zero-padded), rotary on Q and K."""
+    k = gpu.kernel("ops.metal", "vit_qkv_rope")
+    gpu.launch(k, (-(-hdp // 32), 3 * H, N), (32, 1, 1), [qkv, cos, sin, Q, K, V], pack("5i", N, H, hd, hdp, rows))
+
+
+def gelu(gpu: Gpu, x: Tensor, y: Tensor, n: int, exact: bool = False):
+    """y = half(gelu(x)) over n floats; exact: the erf form, else the tanh approximation."""
+    k = gpu.kernel("ops.metal", "gelu")
+    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, y], pack("2i", n, int(exact)))

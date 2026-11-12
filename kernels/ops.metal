@@ -548,3 +548,55 @@ kernel void to_half(device const float *x [[buffer(0)]],
 {
   if (int(i) < n) y[i] = half(x[i]);
 }
+
+// ---- Vision tower (edits) ----------------------------------------------------------------------------------------
+// qkv [N][3][H][HD] float -> Q, K, V [H][rows][HDP] half, rotary embedding (rotate-half pairs (c, c + HD/2), angle
+// tables cos/sin [N][HD]) on queries and keys, head dim zero-padded from HD to HDP for the attention kernel.
+struct VitRopeParams { int N, H, HD, HDP, rows; };
+
+kernel void vit_qkv_rope(device const float *qkv [[buffer(0)]],
+                         device const float *cs [[buffer(1)]],
+                         device const float *sn [[buffer(2)]],
+                         device half *Q [[buffer(3)]],
+                         device half *K [[buffer(4)]],
+                         device half *V [[buffer(5)]],
+                         constant VitRopeParams &p [[buffer(6)]],
+                         uint3 gid [[thread_position_in_grid]])
+{
+  const int c = int(gid.x), slot = int(gid.y), n = int(gid.z);  // channel, (component, head), row
+  if (c >= p.HDP || slot >= 3 * p.H || n >= p.N) return;
+  const int comp = slot / p.H, h = slot % p.H;
+  device half *dst = (comp == 0 ? Q : comp == 1 ? K : V) + (size_t(h) * p.rows + n) * p.HDP + c;
+  if (c >= p.HD) { *dst = half(0.0f); return; }
+  const device float *src = qkv + size_t(n) * 3 * p.H * p.HD + size_t(slot) * p.HD;
+  float v = src[c];
+  if (comp < 2) {
+    const int half_d = p.HD / 2;
+    const float partner = c < half_d ? -src[c + half_d] : src[c - half_d];
+    v = v * cs[size_t(n) * p.HD + c] + partner * sn[size_t(n) * p.HD + c];
+  }
+  *dst = half(v);
+}
+
+// y = half(gelu(x)), x float [M][N] row-major; mode 0: tanh approximation, 1: exact (erf).
+struct GeluParams { int n; int exact; };
+
+static inline float erf_approx(float x) {
+  // Abramowitz and Stegun 7.1.26 (|error| < 1.5e-7).
+  const float t = 1.0f / (1.0f + 0.3275911f * fabs(x));
+  const float y = 1.0f - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t +
+                          0.254829592f) * t * exp(-x * x);
+  return copysign(y, x);
+}
+
+kernel void gelu(device const float *x [[buffer(0)]],
+                 device half *y [[buffer(1)]],
+                 constant GeluParams &p [[buffer(2)]],
+                 uint i [[thread_position_in_grid]])
+{
+  if (int(i) >= p.n) return;
+  const float v = x[i];
+  const float g = p.exact ? 0.5f * v * (1.0f + erf_approx(v * 0.70710678f))
+                          : 0.5f * v * (1.0f + precise::tanh(0.7978845608f * (v + 0.044715f * v * v * v)));
+  y[i] = half(g);
+}

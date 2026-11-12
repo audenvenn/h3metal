@@ -220,7 +220,11 @@ def edit_inputs(pipe: "Pipeline", prompt: str, images, draws: _Draws):
     vae_imgs = [edit.resize_image(im, 1024, 2048) for im in imgs]
     vis_imgs = [edit.resize_image(im, 1024, 1024) for im in imgs]
     wf = WeightFile(pipe.gpu, pipe.paths["vision"])
-    vt = edit.VisionTower({k: wf.host(k).astype(np.float32) for k in wf.entries}, wf.meta["config"])
+    if os.environ.get("H3METAL_VISION", "mlx") == "engine":
+        from .vision import VisionTower
+        vt = VisionTower(pipe.gpu, wf)
+    else:
+        vt = edit.VisionTower({k: wf.host(k).astype(np.float32) for k in wf.entries}, wf.meta["config"])
     feats, deep, grids = [], [[], [], []], []
     for im in vis_imgs:
         p, grid = edit.vision_patches(np.asarray(im))
