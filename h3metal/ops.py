@@ -161,16 +161,14 @@ def swiglu(gpu: Gpu, x: Tensor, out: Tensor, M: int, F: int):
 
 
 def im2col(gpu: Gpu, x: Tensor, col: Tensor, *, N: int, H: int, W: int, C: int, KH: int, KW: int, stride: int,
-           pad_t: int, pad_l: int, K: int, zero_pad: bool = False, up2: bool = False, row0: int = 0,
-           rows: int | None = None):
+           pad_t: int, pad_l: int, K: int, zero_pad: bool = False, row0: int = 0, rows: int | None = None):
     """col[N*Ho*Wo][K] <- the (ky, kx, c) taps of each output pixel of an NHWC half image, reflect-padded (or
-    zero-padded). up2: the input is x upsampled 2x by nearest neighbour (H, W the upsampled sides).
-    row0, rows: only output rows row0 .. row0 + rows (a stripe; Ho is then rows)."""
+    zero-padded). row0, rows: only output rows row0 .. row0 + rows (a stripe; Ho is then rows)."""
     Ho = (H + 2 * pad_t - KH) // stride + 1 if stride == 1 else (H + 1 - KH) // stride + 1
     Wo = (W + 2 * pad_l - KW) // stride + 1 if stride == 1 else (W + 1 - KW) // stride + 1
     if rows is not None:
         Ho = rows
-    k = gpu.kernel("ops.metal", "im2col", ZPAD=int(zero_pad), UP2=int(up2))
+    k = gpu.kernel("ops.metal", "im2col", ZPAD=int(zero_pad))
     total = -(-C // 4) * KH * KW * N * Ho * Wo
     gpu.launch(k, (-(-total // 256), 1, 1), (256, 1, 1), [x, col],
                pack("13i", N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K, row0))

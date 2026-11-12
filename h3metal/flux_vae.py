@@ -88,15 +88,13 @@ class FluxVAEDecoder:
         self.mid = [resnet("decoder.mid_block.resnets.0"), resnet("decoder.mid_block.resnets.1")]
         a = "decoder.mid_block.attentions.0"
         self.attn_norm = norm(a + ".group_norm")
-        C = self.conv_in[3]
-        self.C_mid = C
         self.wq, self.wk = lin(a + ".to_q"), lin(a + ".to_k")
-        self.wv = h(a + ".to_v.weight").astype(np.float32)
+        wv = h(a + ".to_v.weight").astype(np.float32)
         bv = h(a + ".to_v.bias").astype(np.float32)
         wo = h(a + ".to_out.0.weight").astype(np.float32)
         # Softmax rows sum to one, so the value bias passes through the attention: fold it into to_out's bias.
         self.wo = lin(a + ".to_out.0", bias=wo @ bv + h(a + ".to_out.0.bias").astype(np.float32))
-        self.wv_act = gpu.upload(self.wv.astype(np.float16))  # V^T = W_v x^T: W_v as the left operand
+        self.wv_act = gpu.upload(wv.astype(np.float16))  # V^T = W_v x^T: W_v as the left operand
         n_up = len(c["block_out_channels"])
         self.ups = []
         for i in range(n_up):
@@ -132,9 +130,9 @@ class FluxVAEDecoder:
             self._ones[key] = (self.gpu.upload(np.ones((1, N), np.float32)), rt)
         return self._ones[key]
 
-    def _conv(self, xh: Tensor, H: int, W: int, cw, out: Tensor, accumulate: bool = False, up2: bool = False):
-        """3x3 (zero-padded) or 1x1 convolution of a half NHWC image -> float out [H*W][N] (+= with accumulate).
-        up2: xh is the half-size source of a 2x nearest upsampling (H, W are the upsampled sides)."""
+    def _conv(self, xh: Tensor, H: int, W: int, cw, out: Tensor, accumulate: bool = False):
+        """3x3 (zero-padded, through im2col in stripes) or 1x1 convolution of a half NHWC image -> float out
+        [H*W][N] (+= with accumulate). conv_in only: its 16 input channels are too few for conv3x3."""
         g = self.gpu
         wt, k, cin, cout = cw
         M = H * W
@@ -151,7 +149,7 @@ class FluxVAEDecoder:
         for r0 in range(0, H, rows):
             n = min(rows, H - r0)
             ops.im2col(g, xh, col, N=1, H=H, W=W, C=cin, KH=3, KW=3, stride=1, pad_t=1, pad_l=1, K=wt.K,
-                       zero_pad=True, up2=up2, row0=r0, rows=n)
+                       zero_pad=True, row0=r0, rows=n)
             o = out.row(r0 * W, n * W)
             if accumulate:
                 ops.gemm(g, col, wt, o, n * W, epi=1, rtype=rt, gate=ones)

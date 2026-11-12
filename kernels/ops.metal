@@ -503,20 +503,16 @@ kernel void swiglu(device const half *in [[buffer(0)]],
   out[size_t(m) * p.F + j] = half(float(row[j]) * g / (1.0f + exp(-g)));
 }
 
-// ---- Convolutions as matrix products (the VAE encoder, the FLUX decoder) ---
+// ---- Convolutions as matrix products (first layers with few channels) ------
 // Activations are NHWC. im2col writes, for every output pixel of a 3x3 (or
 // 1x1) convolution, the KH*KW*C input values it reads, in (ky, kx, c) order,
 // padded with zeros to K columns. Out-of-image taps read the reflection of
 // the image (no edge repeat), or zeros with ZPAD; pad_t/pad_l give the
 // padding before the first row/column, the bottom/right side is whatever the
-// stride leaves. With UP2 the convolution's input is the source image
-// upsampled 2x by nearest neighbour (H, W are the upsampled sides), read
-// straight from the source. Output rows start at row0 (a stripe of Ho rows).
+// stride leaves. Output rows start at row0 (a stripe of Ho rows). Wider
+// convolutions run without im2col (kernels/conv.metal).
 #ifndef ZPAD
 #define ZPAD 0
-#endif
-#ifndef UP2
-#define UP2 0
 #endif
 struct Im2colParams { int N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K, row0; };
 
@@ -551,11 +547,7 @@ kernel void im2col(device const half *x [[buffer(0)]],
   iy = reflect(iy, p.H);
   ix = reflect(ix, p.W);
 #endif
-#if UP2
-  const device half *src = x + ((size_t(n) * (p.H / 2) + iy / 2) * (p.W / 2) + ix / 2) * p.C + c4;
-#else
   const device half *src = x + ((size_t(n) * p.H + iy) * p.W + ix) * p.C + c4;
-#endif
   if ((p.C & 3) == 0) {
     *(device half4 *)dst = *(const device half4 *)src;
   } else {

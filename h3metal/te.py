@@ -1,12 +1,16 @@
-"""The text encoder: the first 50 decoder layers of MiniMax-H3's Qwen3-VL
-conditioner. MiniMax-H3-Image conditions on hidden_states[50], the residual
-stream after decoder layer 50, so the remaining layers, the final norm and
-the language-model head are never needed.
+"""Text encoders of the Qwen3 family, run up to the layer a diffusion model reads.
 
-Prompts are tokenized verbatim (no chat template, no special tokens). For an
+MiniMax-H3-Image conditions on hidden_states[50] of its Qwen3-VL
+conditioner, the residual stream after decoder layer 50, so the remaining
+layers, the final norm and the language-model head are never needed. Its
+prompts are tokenized verbatim (no chat template, no special tokens). For an
 edit, every reference image contributes a label and a vision block whose
 rows hold the vision tower's features; the three DeepStack feature sets are
 added to those rows after decoder layers 1, 2 and 3.
+
+Z-Image reads hidden_states[-2] of a plain Qwen3-4B (h3metal/zimage.py):
+the same decoder with one-dimensional positions, which Qwen3-VL's
+multimodal rotary embedding reduces to when its three axes agree.
 """
 
 from __future__ import annotations
@@ -136,7 +140,8 @@ class TextEncoder:
 
     def encode(self, ids, pos3: np.ndarray | None = None, vision: np.ndarray | None = None,
                vision_rows: np.ndarray | None = None, deepstack: list | None = None, profile=None) -> np.ndarray:
-        """Token ids -> hidden_states[50] as float32 [T][D] (rounded to bfloat16 like the reference).
+        """Token ids -> the hidden states after the stored layers as float32 [T][D] (rounded to bfloat16 like
+        the reference).
 
         pos3: [3][T] multimodal positions (default: text positions 0..T-1 on all three axes).
         vision: [n][D] features replacing the rows `vision_rows`; deepstack: three [n][D] arrays added to
