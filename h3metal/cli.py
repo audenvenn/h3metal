@@ -10,13 +10,29 @@ import time
 DEFAULT_MODEL = os.environ.get("H3METAL_MODEL", os.path.expanduser("~/.h3metal/model"))
 
 
+AREAS = {"4k": 4096 * 4096, "2k": 2048 * 2048, "1k": 1024 * 1024}
+
+
+def size_for(ratio: str, area: int = AREAS["4k"]):
+    """The official sizing: about `area` pixels at the ratio, both sides multiples of 32 (16:9 -> 5472x3072)."""
+    import math
+    x, y = (int(v) for v in ratio.split(":"))
+    return round(math.sqrt(area * x / y) / 32) * 32, round(math.sqrt(area * y / x) / 32) * 32
+
+
 def _size(s: str):
+    """WIDTHxHEIGHT, or a ratio like 16:9 (the official ~16 MP size), optionally @2k or @1k for a smaller area."""
+    s = s.lower()
     try:
-        w, h = (int(x) for x in s.lower().split("x"))
-    except ValueError:
-        raise argparse.ArgumentTypeError("size must look like 2048x2048")
-    if w % 32 or h % 32 or not (512 <= w <= 8192 and 512 <= h <= 8192):
-        raise argparse.ArgumentTypeError("width and height must be multiples of 32 between 512 and 8192")
+        if ":" in s:
+            ratio, _, area = s.partition("@")
+            w, h = size_for(ratio, AREAS[area or "4k"])
+        else:
+            w, h = (int(x) for x in s.split("x"))
+    except (ValueError, KeyError):
+        raise argparse.ArgumentTypeError("size must look like 2048x2048, 16:9 or 16:9@2k")
+    if w % 32 or h % 32 or not (256 <= w <= 8192 and 256 <= h <= 8192):
+        raise argparse.ArgumentTypeError("width and height must be multiples of 32 between 256 and 8192")
     return w, h
 
 
@@ -99,7 +115,9 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate", help="text to image, or an edit with --image")
     g.add_argument("-p", "--prompt", required=True)
-    g.add_argument("-s", "--size", type=_size, default=(2048, 2048), help="WIDTHxHEIGHT (default 2048x2048)")
+    g.add_argument("-s", "--size", type=_size, default=(2048, 2048),
+                   help="WIDTHxHEIGHT, or an aspect ratio such as 16:9 for the official ~16 MP size "
+                        "(16:9@2k for ~4 MP); default 2048x2048")
     g.add_argument("--seed", type=int, default=0)
     g.add_argument("-n", "--count", type=int, default=1, help="images to make, with seeds seed, seed+1, ...")
     g.add_argument("-o", "--output")
