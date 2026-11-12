@@ -13,6 +13,7 @@ measure its image quality.
 """
 import argparse
 import json
+import threading
 import os
 import sys
 import time
@@ -37,6 +38,36 @@ class Shards:
         self.wm = json.load(open(os.path.join(d, idx[0])))["weight_map"] if idx else None
         self.single = None if idx else [f for f in os.listdir(d) if f.endswith(".safetensors")][0]
         self.open = {}
+        self.hdr = {}
+
+    def _ranges(self, fn):
+        if fn not in self.hdr:
+            with open(os.path.join(self.d, fn), "rb") as f:
+                n = int.from_bytes(f.read(8), "little")
+                h = json.loads(f.read(n))
+            self.hdr[fn] = (8 + n, {k: v["data_offsets"] for k, v in h.items() if k != "__metadata__"})
+        return self.hdr[fn]
+
+    def warm(self, keys):
+        """Reads the tensors' bytes with large sequential reads, so the memory-mapped loads that follow hit the
+        page cache: page faults alone read the file a few tens of kilobytes at a time."""
+        spans = {}
+        for k in keys:
+            fn = self.wm[k] if self.wm else self.single
+            base, offs = self._ranges(fn)
+            a, b = offs[k]
+            lo, hi = spans.get(fn, (1 << 62, 0))
+            spans[fn] = (min(lo, base + a), max(hi, base + b))
+        buf = bytearray(64 << 20)
+        for fn, (lo, hi) in spans.items():
+            with open(os.path.join(self.d, fn), "rb", buffering=0) as f:
+                f.seek(lo)
+                left = hi - lo
+                while left > 0:
+                    got = f.readinto(memoryview(buf)[:min(left, len(buf))])
+                    if not got:
+                        break
+                    left -= got
 
     def get(self, k):
         fn = self.wm[k] if self.wm else self.single
@@ -175,7 +206,13 @@ def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
             x = x.index_copy(1, img_idx.to(dev), image_embeds.to(text_embeds.dtype))
             temb = model.time_embedder(model.time_proj(uniq.to(dev)).float())
             adaln_idx = (tidx * 3 + token_tags).to(dev)
+            nxt = threading.Thread(target=sh.warm, args=(sh.keys_with("blocks.0."),))
+            nxt.start()
             for l in range(cfgj["num_layers"]):
+                nxt.join()
+                if l + 1 < cfgj["num_layers"]:  # the next block is read while this one runs
+                    nxt = threading.Thread(target=sh.warm, args=(sh.keys_with(f"blocks.{l + 1}."),))
+                    nxt.start()
                 sd = {}
                 for k in sh.keys_with(f"blocks.{l}."):
                     t = sh.get(k)
