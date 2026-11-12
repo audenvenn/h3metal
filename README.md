@@ -33,6 +33,8 @@ h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
 h3metal generate -p "Put <Picture 1> on a beach at dusk" -i photo.jpg -o edit.png
 ```
 
+The model comes with its own license, which limits where and how it may be
+used: read [The model's license](#the-models-license) before downloading.
 `h3metal download --source modelscope` fetches from ModelScope instead of
 Hugging Face. Converting reads the checkpoint once; afterwards
 `~/.h3metal/model` holds everything h3metal runs, 40-50 GB depending on the
@@ -107,7 +109,8 @@ Images come out as `uint8` arrays; `timing` says where the time went.
   that runs is pinned. The 26 GB text encoder streams from the SSD with a
   footprint of half a gigabyte, and a transformer larger than the Mac's
   memory streams its blocks while others compute.
-- **GPTQ** chooses the 4-bit codes against real denoising trajectories.
+- **GPTQ**, optionally (`h3metal convert --gptq`, about an hour on an M6),
+  chooses the 4-bit codes against real denoising trajectories.
 
 [docs/design.md](docs/design.md) has the details, including what was tried
 and did not pay.
@@ -150,7 +153,10 @@ modules (relative L2 error of the output):
 | VAE decoder | real weights, against float32 | 79.6 dB PSNR |
 
 An edit's inputs (tokens, rotary positions, the packed sequence) are
-identical to the official pipeline's. Whole images have not been compared
+identical to the official pipeline's. On the real weights the three formats
+give equally clean images; at the same seed, int4 weights move details
+(where an animal's tail lies, the shading of a small object), as any change
+in the numerics of a diffusion model does. Whole images have not been compared
 with the official pipeline's yet: in bfloat16 it needs about 135 GB, and the
 streamed reference runner in `tests/ref` is too slow on the CPU (an hour per
 1024 x 1024 image) and does not yet fit the GPU of a 24 GB Mac
