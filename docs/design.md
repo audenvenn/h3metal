@@ -125,24 +125,33 @@ Weight files (`.h3m`) are mapped read-only and handed to Metal without a copy,
 in 1 GiB buffers. Metal pins every buffer a command buffer references, so the
 engine submits one command buffer per transformer block: only the block that
 runs is pinned, and the kernel pages the rest in and out as needed. With
-4-bit weights the transformer takes 10 GB, with int8 attention and int4 MLP
-13.5 GB, and either stays resident on a 24 GB Mac. Int8 weights (19.3 GB) do
-not fit there, and plain least-recently-used eviction would then read the
-whole file again at every step, since every block is used once per step in
-the same order. So the engine keeps as many blocks resident as Metal's
-working-set estimate allows (less room for activations) and streams only the
-rest: each streamed block is read two blocks ahead and marked for eviction
-(`MADV_DONTNEED`) right after use, so the kernel drops those pages rather
-than the resident ones.
+4-bit weights the transformer's file is 10.8 GB, with int8 attention and
+int4 MLP 14.9 GB, and either stays in memory on a 24 GB Mac. Int8 weights
+(20.8 GB) do not fit there. Every block is used once per step, always in the
+same order, so least-recently-used eviction reads most of the file again at
+every step. The engine tries to keep as many blocks resident as Metal's
+working-set estimate allows and to stream only the rest: each streamed block
+is read two blocks ahead and marked for eviction (`MADV_DONTNEED`) after use.
+Measured, that does not hold. The GPU's reads do not mark pages as used, so
+the kernel evicts the resident blocks as readily as the streamed ones
+(touching their pages from the CPU at every step did not help either), and
+six steps at 1024 x 1024 still page in about 100 GB. At 2048 x 2048 and above
+a step computes for longer than the SSD needs to read the whole file (it
+reads 5.9 GB/s), so int8 costs little there; at 1024 x 1024 it is bound by
+the SSD. That is why `h3metal convert` picks the format from the Mac's
+memory (`--dit auto`): int8 above 24 GB, int8 attention with int4 MLP at
+24 GB, int4 at 16 GB.
+
 The text encoder is mapped while it runs and released before the transformer
-starts; it, too, commits one layer at a time, so its 26 GB of int8 weights
-stream from the SSD in 4-5 seconds with a footprint of about half a
-gigabyte. Its products take int8 weights with half-precision activations:
-against the official module run in float32, its output (hidden_states[50])
-is within 0.47% (relative L2 error; mean per-token cosine 0.99995). The
-int8-activation path (`H3METAL_TE_ACT=i8`) is faster on long prompts and
-within 1.4%. Prompt embeddings are cached on disk (`~/.h3metal/cache`), so a
-repeated prompt skips the text encoder.
+starts; it, too, commits one layer at a time and reads two layers ahead, so
+its 26 GB of int8 weights stream from the SSD in about 5 seconds (5.2 GB/s)
+with a footprint of about half a gigabyte. Its products take int8 weights
+with half-precision activations: against the official module run in
+float32, its output (hidden_states[50]) is within 0.37% (relative L2 error,
+mean over nine prompts; mean per-token cosine 0.99996). The int8-activation
+path (`H3METAL_TE_ACT=i8`) is faster on long prompts and within 1.24%.
+Prompt embeddings are cached on disk (`~/.h3metal/cache`), so a repeated
+prompt skips the text encoder.
 
 ## VAE
 
@@ -172,5 +181,14 @@ The engine reproduces the official pipeline's math: the packed sequence and
 its rotary positions, the float32 round trips of the timesteps, the
 modulation's bfloat16 rounding, the tiled VAE decode with its blending, the
 8-bit truncation of the output. Its tests compare it with the official
-diffusers and transformers modules: on random weights for the transformer and
-the text encoder, on the real weights for the VAE and the edit-only parts.
+diffusers and transformers modules: on random weights for the transformer,
+on the real weights for the text encoder, the vision tower and the VAE (the
+figures are in the README's Image quality section).
+
+Whole images have not been compared with the official pipeline's yet. In
+bfloat16 the official pipeline needs about 135 GB. `tests/ref/reference.py`
+runs it through the official modules with the transformer streamed one block
+at a time. On the CPU that works but takes about an hour per 1024 x 1024
+image. On the GPU of a 24 GB Mac it ran into swap within seconds, for a
+reason not found yet. A comparison on a larger Mac, or on a GPU server, would
+settle it.

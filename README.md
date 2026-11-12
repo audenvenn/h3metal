@@ -60,6 +60,15 @@ h3metal generate -p PROMPT [-s SIZE] [--seed N] [-n COUNT] [-o OUT.png] [-i REF.
 - The very first run compiles the Metal kernels, which adds a few seconds;
   macOS caches them for later runs.
 
+MiniMax-H3-Image expects a detailed English description of the whole image.
+MiniMax's API expands short prompts first (H3-Image-Context-IR), and for
+text-to-image MiniMax publishes a local prompt expander,
+[MiniMax-H3-Image-PE](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image-PE).
+h3metal uses the prompt as given. For an edit, say what should stay as well
+as what should change, including the exact wording of any text in the
+picture: with only "keep all text unchanged", small lettering can come out
+redrawn.
+
 From Python:
 
 ```python
@@ -124,7 +133,25 @@ nine prompts; per-token cosine 0.99996).
 
 ## Image quality
 
-TBD
+h3metal computes what the official pipeline computes, at lower precision.
+Its tests compare each part with the official diffusers and transformers
+modules (relative L2 error of the output):
+
+| Part | Compared on | Error |
+|---|---|---:|
+| Transformer, `q8` (every step) | random weights | 0.13% |
+| Transformer, `q4` | random weights | 0.35%; 0.26% with GPTQ |
+| Text encoder | real weights, nine prompts, against float32 | 0.37% |
+| Vision tower | real weights | 1.1% |
+| VAE encoder | real weights | 0.28% |
+| VAE decoder | real weights, against float32 | 79.6 dB PSNR |
+
+An edit's inputs (tokens, rotary positions, the packed sequence) are
+identical to the official pipeline's. Whole images have not been compared
+with the official pipeline's yet: in bfloat16 it needs about 135 GB, and the
+streamed reference runner in `tests/ref` is too slow on the CPU (an hour per
+1024 x 1024 image) and does not yet fit the GPU of a 24 GB Mac
+([details](docs/design.md#exactness)).
 
 ## Benchmarks
 
