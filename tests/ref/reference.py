@@ -236,7 +236,11 @@ def main():
     res = {"ids": np.array(ids), "canvas": np.array([ch, cw])}
     t = time.time()
     if a.emb:
-        emb = torch.from_numpy(np.load(a.emb)["emb"]).to(torch.bfloat16)
+        saved = np.load(a.emb)
+        emb = torch.from_numpy(saved["emb"]).to(torch.bfloat16)
+        res["ids"] = saved["ids"]  # the prompt's tokens come with its embeddings
+        if "tags" in saved:
+            res["tags"] = saved["tags"]
     elif a.image:
         ids, tags, emb = edit_text_encoder(a.weights, a.prompt, a.image, dev, dtype)
         emb = emb.cpu()
