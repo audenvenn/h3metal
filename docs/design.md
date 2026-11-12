@@ -37,8 +37,8 @@ M5- and M6-class GPUs have matrix units in every core, reached through Metal
 4's tensor operations (`mpp::tensor_ops::matmul2d`). They multiply integer
 operands natively: int8 x int8 and int8 x int4 accumulate into int32. On an
 M6 (12-core GPU) the matrix units reach about 42 TOPS in int8 and 20 TFLOPS
-in half precision when fed from registers (`tests` microbenchmarks); h3metal's
-products reach 30-36 TOPS at the transformer's shapes.
+in half precision when fed from registers (`bench/hw/mma_rate.py`); h3metal's
+products reach 31-38 TOPS at the transformer's shapes.
 
 Weights are stored as int8 (W8A8) or int4 (W4A8) with one scale per output
 row. Activations are quantized to int8 per row, on the fly, by the kernel
@@ -50,13 +50,28 @@ float residual stream.
 
 Long products run as several dispatches over slices of K, all accumulating
 into the residual stream: exact, and each dispatch's working set fits the
-caches better. The MLP's second product (K = 14,336) uses four slices around
-2048 x 2048 and two otherwise, with 32 x 512 tiles; the attention output
+caches better. The MLP's second product (K = 14,336) uses 32 x 256 tiles
+with four slices from 2048 x 2048 up and two below; the attention output
 (K = 7,168) two slices around 2048 x 2048. Tiles and splits come from
 interleaved A/B runs on a warm GPU, which is what a long generation runs on:
-a quick sweep on a cool GPU ranks them differently. At 2048 x 2048 a whole
-block takes 139 ms: the four products about 73% (33 TOPS on average),
-attention 22%, the norms, rotary embedding and rotations the remaining 5%.
+a quick sweep on a cool GPU ranks them differently.
+
+A sweep also has to check what it times. A 32 x 512 tile once came out
+fastest for the int8 MLP down-projection because its results were wrong
+(the matrix units' library or the kernel mishandles that shape; which one is
+not known yet). The int8 transformer's images were grainy until a
+comparison of the weight formats on real weights showed it. Now
+`tests/test_gemm.py` checks every tile and split the transformer uses, at
+its real shapes and sizes, and `ops.gemm` refuses tiles wider than 256
+columns.
+
+At 2048 x 2048 a whole int8 block takes 132 ms, 76% of the time the matrix
+units would need at their measured peaks. The four products take 73% of the
+block at 34.9 TOPS (83% of the int8 peak), attention 21%, and the norms,
+rotary embedding and rotations the remaining 5%. With int4 weights the
+products reach 31.5 TOPS, since unpacking the 4-bit codes costs time once
+the products are compute-bound; int4 pays where memory is short, not in
+speed. docs/benchmarks.md has the profiles.
 
 ### Rotation
 
