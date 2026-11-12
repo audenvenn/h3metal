@@ -126,6 +126,21 @@ def test_torch_randn_replica():
     assert np.allclose(got[:8], want, atol=1e-6), got[:8]
 
 
+def test_cli_sizes_and_device_check():
+    import argparse
+    from h3metal.cli import _size, size_for
+    from h3metal.gpu import has_matrix_units
+    assert size_for("16:9") == (5472, 3072) and size_for("1:1") == (4096, 4096)  # MiniMax's recommended sizes
+    assert _size("2048x1536") == (2048, 1536) and _size("16:9@2k") == size_for("16:9", 2048 * 2048)
+    for bad in ("2000x2000", "100x100", "16:9@8k", "big"):
+        try:
+            _size(bad)
+            raise AssertionError(bad)
+        except argparse.ArgumentTypeError:
+            pass
+    assert has_matrix_units("Apple M6") and has_matrix_units("Apple M5 Pro") and not has_matrix_units("Apple M4 Max")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
