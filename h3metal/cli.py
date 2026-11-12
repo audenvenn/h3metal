@@ -164,7 +164,14 @@ def main(argv=None):
     i.add_argument("--model", default=DEFAULT_MODEL)
     i.set_defaults(func=cmd_info)
     a = ap.parse_args(argv)
-    a.func(a)
+    try:
+        a.func(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:  # a one-line message; H3METAL_DEBUG=1 shows the traceback
+        if os.environ.get("H3METAL_DEBUG"):
+            raise
+        sys.exit(f"h3metal: error: {e}")
 
 
 if __name__ == "__main__":
