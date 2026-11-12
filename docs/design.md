@@ -73,9 +73,17 @@ Full self-attention over the packed sequence, 56 heads of 128. The kernel is
 a flash-attention variant built on the matrix units' SIMD-group operations:
 16 query rows per SIMD-group, keys and values staged in threadgroup memory
 per block of 32, scores and the running softmax kept in registers, and the
-output's rescale skipped whenever no row's running maximum moved. It reaches
-14-15 TFLOPS at the transformer's sequence lengths, against 9.8-15.5 for
-MLX's fused attention on the same machine.
+output's rescale skipped whenever no row's running maximum moved. In half
+precision it reaches 14-15 TFLOPS at the transformer's sequence lengths,
+against 9.8-15.5 for MLX's fused attention on the same machine.
+
+The transformer runs the score product in int8: the kernel that applies the
+query/key norms and the rotary embedding also quantizes every query and key
+row to int8 with its own scale, the scores accumulate in int32 at twice the
+half-precision rate, and the two scales are applied to each block of scores
+before the softmax. P V stays in half precision. A layer's attention takes
+29.6 ms instead of 37.5 ms at 2048 x 2048 and 0.46 s instead of 0.56 s at
+4096 x 4096, where attention is half of a block's time.
 
 ## Memory
 
@@ -86,7 +94,32 @@ runs is pinned, and the kernel pages the rest in and out as needed. With
 4-bit weights the transformer takes 10 GB and stays resident; 8-bit weights
 (19 GB) can be streamed, the next block read ahead while the current one runs.
 The text encoder is mapped while it runs and released before the transformer
-starts.
+starts; it, too, commits one layer at a time, so its 26 GB of int8 weights
+stream from the SSD in 4-5 seconds with a footprint of about half a
+gigabyte. Its products take int8 weights with half-precision activations
+(the int8 path, `H3METAL_TE_ACT=i8`, is faster on long prompts but less
+accurate). Prompt embeddings are cached on disk (`~/.h3metal/cache`), so a
+repeated prompt skips the text encoder.
+
+## VAE
+
+The decoder is a 24-layer ViT applied to overlapping 256-pixel tiles: all
+tiles of a size run as one batch, through the same matrix-product and
+attention kernels as the transformer (a batch of short sequences in one
+dispatch), and are blended exactly as the reference blends them. The
+encoder, needed for the reference images of an edit, is a CNN: every
+convolution runs as an im2col pass and a half-precision product on the
+matrix units, with GroupNorm and SiLU fused into one pass. A 2048 x 2048
+reference encodes in about 4 seconds.
+
+## Edits
+
+The vision tower of Qwen3-VL (27 layers) turns each reference image into
+the features of its vision block in the text encoder's input, plus three
+DeepStack feature sets that are added to those rows after the first three
+decoder layers. It runs on MLX, about a second per reference. The
+references then enter the transformer as their own rows, held at
+t = 0.999, ahead of the image rows.
 
 ## Exactness
 

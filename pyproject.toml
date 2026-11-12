@@ -27,7 +27,7 @@ classifiers = [
 dependencies = ["numpy", "tokenizers", "pillow"]
 
 [project.optional-dependencies]
-# Image editing runs the vision tower and the VAE encoder on MLX.
+# Image editing runs the vision tower on MLX.
 edit = ["mlx>=0.30"]
 
 [project.urls]
