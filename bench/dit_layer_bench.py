@@ -26,6 +26,8 @@ dit = DiT.__new__(DiT)
 dit.gpu = gpu; dit.D, dit.H, dit.hd, dit.F = D, H, hd, F; dit.inner = H * hd
 dit.cfg = {"norm_eps": 1e-5, "qk_eps": 1e-5, "rope_freq": 16, "rope_theta": 10000.0}
 dit.patch_dim = 96; dit._bufs = None; dit.attn_cfg = dict(wm=32, bk=32); dit.qk8 = os.environ.get("H3METAL_QK8", "1") == "1"
+_spec = os.environ.get("H3METAL_ATTN", "v1")  # as in DiT.__init__
+dit.attn_v2 = {k: int(v) for k, v in (kv.split("=") for kv in _spec[3:].split(",") if kv)} if _spec.startswith("v2") else None
 dit.x_embed_w = None
 lat = side // 16
 lay = Layout(T, np.ones(T, np.uint8), [], lat, lat)
