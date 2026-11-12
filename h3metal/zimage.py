@@ -490,6 +490,7 @@ class ZImagePipeline:
             if progress:
                 progress(s + 1, dit.n_steps)
         t = time.time()
+        dit.free()  # its activations (about 2 GB at 2048 x 2048) are not needed while decoding; the weights stay mapped
         wf = WeightFile(self.gpu, self.paths["vae"])
         img = FluxVAEDecoder(self.gpu, wf).decode(x)
         wf.close()

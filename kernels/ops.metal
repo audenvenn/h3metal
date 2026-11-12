@@ -562,12 +562,15 @@ kernel void im2col(device const half *x [[buffer(0)]],
 // threadgroup of 256 threads per run of GN_CHUNK pixels of one image writing that run's per-group sums to
 // part[n][chunk][g], then gn_reduce, one thread per image and group adding the runs in order.
 struct GnParams { int N, HW, C, G; float eps; int silu; int pass; int W; int chunks; };
+#ifndef GN_IN_T
+#define GN_IN_T float  // the input's precision (statistics and normalization always in float)
+#endif
 #ifndef PADW
 #define PADW 0  // gn_apply: write the inside of images with a one-pixel border (the input of a conv3x3)
 #endif
 #define GN_CHUNK 2048
 
-kernel void gn_stats(device const float *x [[buffer(0)]],
+kernel void gn_stats(device const GN_IN_T *x [[buffer(0)]],
                      device float *part [[buffer(1)]],
                      device const float *stats [[buffer(2)]],
                      constant GnParams &p [[buffer(3)]],
@@ -581,11 +584,11 @@ kernel void gn_stats(device const float *x [[buffer(0)]],
   const int C4 = p.C / 4, cg = p.C / p.G;
   const int q = tid % C4, g = q * 4 / cg;
   const float mean = p.pass == 1 ? stats[(n * p.G + g) * 2] / float(p.HW * cg) : 0.0f;
-  const device float4 *x4 = (const device float4 *)x + size_t(n) * p.HW * C4;
+  const device vec<GN_IN_T, 4> *x4 = (const device vec<GN_IN_T, 4> *)x + size_t(n) * p.HW * C4;
   float s = 0;
   const int end = min(px0 + GN_CHUNK, p.HW);
   for (int px = px0 + tid / C4; px < end; px += 256 / C4) {
-    const float4 v = x4[size_t(px) * C4 + q] - mean;
+    const float4 v = float4(x4[size_t(px) * C4 + q]) - mean;
     s += p.pass == 1 ? dot(v, v) : (v.x + v.y) + (v.z + v.w);
   }
   tmp[tid] = s;
@@ -611,8 +614,8 @@ kernel void gn_reduce(device const float *part [[buffer(0)]],
   stats[(n * p.G + g) * 2 + p.pass] = t;
 }
 
-// y = (x - mean) / std * w + b, optionally SiLU, float in -> half out.
-kernel void gn_apply(device const float *x [[buffer(0)]],
+// y = (x - mean) / std * w + b, optionally SiLU, float or half in -> half out.
+kernel void gn_apply(device const GN_IN_T *x [[buffer(0)]],
                      device const float *sums [[buffer(1)]],
                      device const float *w [[buffer(2)]],
                      device const float *b [[buffer(3)]],
@@ -626,7 +629,7 @@ kernel void gn_apply(device const float *x [[buffer(0)]],
   const float cnt = float(p.HW * (p.C / p.G));
   const float mean = sums[(n * p.G + g) * 2] / cnt;
   const float var = sums[(n * p.G + g) * 2 + 1] / cnt;
-  float v = (x[size_t(pix) * p.C + c] - mean) * rsqrt(var + p.eps) * w[c] + b[c];
+  float v = (float(x[size_t(pix) * p.C + c]) - mean) * rsqrt(var + p.eps) * w[c] + b[c];
   if (p.silu) v = v / (1.0f + exp(-v));
 #if PADW
   const int H = p.HW / p.W, r = pix % p.HW, yy = r / p.W, xx = r % p.W;

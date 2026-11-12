@@ -191,19 +191,23 @@ class FluxVAEDecoder:
         return out
 
     def _resnet(self, r, x: Tensor, role: str, H: int, W: int, C: int):
-        """-> (output float [H*W][cout], cout, its buffer role)."""
+        """-> (output [H*W][cout] in x's precision, cout, its buffer role)."""
         g = self.gpu
         HW = H * W
         cout = r["c1"][3]
+        dt = x.dtype
         hn = self._gn_pad(x, H, W, C, r["n1"])
-        h1 = self._buf("h1", (HW, cout), "f32")
+        h1 = self._buf("h1", (HW, cout), dt)
         self._conv3(hn, H, W, r["c1"], h1)
         h1n = self._gn_pad(h1, H, W, cout, r["n2"])
         if "sc" in r:
-            xs = self._buf("half", (HW, C), "f16")
-            ops.to_half(g, x, xs, HW * C)
+            if dt == "f16":
+                xs = x
+            else:
+                xs = self._buf("half", (HW, C), "f16")
+                ops.to_half(g, x, xs, HW * C)
             role = other(role)
-            out = self._buf(role, (HW, cout), "f32")
+            out = self._buf(role, (HW, cout), dt)
             self._conv(xs, H, W, r["sc"], out)
         else:
             out = x
@@ -236,38 +240,52 @@ class FluxVAEDecoder:
         ones, rt = self._gate(C, L)
         ops.gemm(g, o, self.wo, x, L, epi=1, rtype=rt, gate=ones)
 
-    # -- decode ------------------------------------------------------------------------------------------------
+    # -- decode ----------------------------------------------------------------------------------------------
     def decode(self, z: np.ndarray) -> np.ndarray:
-        """z: the transformer's latents [16][h][w] (before the VAE's scaling) -> image [8h][8w][3] in [-1, 1]."""
+        """z: the transformer's latents [16][h][w] (before the VAE's scaling) -> image [8h][8w][3] in [-1, 1].
+
+        conv_in and the middle block run at the latents' size and keep float activations. The up blocks, up to
+        64 times as many pixels, keep theirs in half precision (sums still in float): at 2048 x 2048 a float
+        activation of 256 channels is 4.3 GB. Half precision rounds to about 1/2000, far below the image's
+        8 bits."""
         g, c = self.gpu, self.cfg
         lat = z.astype(np.float32) / np.float32(c["scaling_factor"]) + np.float32(c["shift_factor"])
         Cl, H, W = lat.shape
         g.wait()  # the scratch buffers below are written from the host
         xin = self._buf("lat", (H * W, Cl), "f16")
         xin.numpy()[:H * W] = lat.transpose(1, 2, 0).reshape(H * W, Cl).astype(np.float16)
-        role = "xa"
         C = self.conv_in[3]
-        x = self._buf(role, (H * W, C), "f32")
+        x = self._buf("mid_a", (H * W, C), "f32")
         self._conv(xin, H, W, self.conv_in, x)
-        x, C, role = self._resnet(self.mid[0], x, role, H, W, C)
+        x, C, _ = self._resnet(self.mid[0], x, "mid_a", H, W, C)
         self._attention(x, H, W, C)
-        x, C, role = self._resnet(self.mid[1], x, role, H, W, C)
+        x, C, _ = self._resnet(self.mid[1], x, "mid_a", H, W, C)
+        role = "xa"
+        xh = self._buf(role, (H * W, C), "f16")
+        ops.to_half(g, x, xh, H * W * C)
+        x = xh
         for res, up in self.ups:
             for r in res:
                 x, C, role = self._resnet(r, x, role, H, W, C)
             if up is not None:
                 H, W = 2 * H, 2 * W
-                xp = self._pbuf("upp", H, W, C)
+                xp = self._pbuf("gnp", H, W, C)  # the norms' bordered buffer, free between them
                 ops.pad_half(g, x, xp, H=H, W=W, C=C, up=2)
                 role = other(role)
-                x = self._buf(role, (H * W, C), "f32")
+                x = self._buf(role, (H * W, C), "f16")
                 self._conv3(xp, H, W, up, x)
             g.commit()
         hn = self._gn_pad(x, H, W, C, self.norm_out)
-        img = self._buf("img", (H * W, self.conv_out[0].N), "f32")
-        self._conv3(hn, H, W, self.conv_out, img)
+        img = self._buf("img", (H * W, 3), "f32")
+        wt = self.conv_out[0]
+        ops.conv3x3(g, hn, wt, img, H=H, W=W, C=C, tile=CONV_TILE, out_channels=3)
         g.wait()
-        return img.numpy()[:H * W, :3].reshape(H, W, 3).copy()
+        return img.numpy()[:H * W].reshape(H, W, 3).copy()
+
+    def release(self):
+        """Frees the scratch buffers (gigabytes at 2048 x 2048)."""
+        self._scratch = {}
+        self._ones = {}
 
 
 def pad(m: int) -> int:

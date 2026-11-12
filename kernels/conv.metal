@@ -8,7 +8,9 @@
 // products whose left operands are views into xp; nothing is copied. A threadgroup computes TM pixels of one
 // output row (the last tile of a row runs past it: those results are dropped) by TN output channels.
 //
-// Epilogues (EPI): 0 out[m][n] = OUT_T(v + bias[n]); 1 out[m][n] += v + bias[n] (out float, a residual).
+// Epilogues (EPI): 0 out[m][n] = OUT_T(v + bias[n]); 1 out[m][n] += v + bias[n] (out a residual, OUT_T
+// float or half: the sum is taken in float either way). Only the first NO output channels are stored, NO
+// apart (a convolution to 3 channels stores 3, though its weights are padded to a whole tile).
 // Specialization: TM, TN, NSG, EPI, OUT_T.
 
 #include <metal_stdlib>
@@ -42,6 +44,7 @@ struct ConvParams {
   int S;        // stride
   int Hp, Wp;   // the padded input's sides
   int off;      // padded coordinates of tap (0, 0) of output (0, 0): 0 for padding 1, 1 for padding 0
+  int NO;       // output channels stored per pixel (<= N)
 };
 
 kernel void conv3x3(device half *xp [[buffer(0)]],
@@ -83,25 +86,28 @@ kernel void conv3x3(device half *xp [[buffer(0)]],
     auto idx = acc.get_multidimensional_index(i);  // {column, row} within the tile
     const int n = n0 + int(idx[0]);
     const int x = x0 + int(idx[1]);
-    if (x >= p.W) continue;
+    if (x >= p.W || n >= p.NO) continue;
     const float v = acc[i] + bias[n];
-    const size_t at = (size_t(row) * p.W + x) * p.N + n;
+    device OUT_T *o = (device OUT_T *)out + (size_t(row) * p.W + x) * p.NO + n;
 #if EPI == 0
-    ((device OUT_T *)out)[at] = OUT_T(v);
+    *o = OUT_T(v);
 #else
-    ((device float *)out)[at] += v;
+    *o = OUT_T(float(*o) + v);
 #endif
   }
 }
 
-// xp[NB][(H + 2)][(W + 2)][C] <- the half-precision copy of x[NB][H][W][C] (float), upsampled UP times by
+// xp[NB][(H + 2)][(W + 2)][C] <- the half-precision copy of x[NB][H][W][C] (float or half), upsampled UP times by
 // nearest neighbour, with a one-pixel border of zeros (or, with REFLECT, the reflection of the image): the
 // input of a conv3x3. One thread per (4 channels, padded pixel).
 struct PadParams { int H, W, C, UP, NB, REFLECT; };  // output H, W (upsampled), channels, factor, images, mode
+#ifndef PAD_IN_T
+#define PAD_IN_T float  // pad_half's input precision
+#endif
 
 static inline int reflect1(int i, int n) { return i < 0 ? -i : (i >= n ? 2 * n - 2 - i : i); }
 
-kernel void pad_half(device const float *x [[buffer(0)]],
+kernel void pad_half(device const PAD_IN_T *x [[buffer(0)]],
                      device half *xp [[buffer(1)]],
                      constant PadParams &p [[buffer(2)]],
                      uint gid [[thread_position_in_grid]])
@@ -117,7 +123,7 @@ kernel void pad_half(device const float *x [[buffer(0)]],
     yy = reflect1(yy, p.H);
     xx = reflect1(xx, p.W);
     const int sy = yy / p.UP, sx = xx / p.UP, sw = p.W / p.UP, sh = p.H / p.UP;
-    v = half4(((const device float4 *)x)[((size_t(img) * sh + sy) * sw + sx) * C4 + c4]);
+    v = half4(((const device vec<PAD_IN_T, 4> *)x)[((size_t(img) * sh + sy) * sw + sx) * C4 + c4]);
   }
   ((device half4 *)xp)[size_t(pix) * C4 + c4] = v;
 }

@@ -177,19 +177,19 @@ def im2col(gpu: Gpu, x: Tensor, col: Tensor, *, N: int, H: int, W: int, C: int, 
 
 def group_norm(gpu: Gpu, x: Tensor, stats: Tensor, w: Tensor, b: Tensor, y: Tensor, *, N: int, HW: int, C: int,
                G: int = 32, eps: float = 1e-6, silu: bool = True, pad_w: int = 0):
-    """y = half(silu?(groupnorm(x))), x float NHWC; stats [N][G][2] float (written here; deterministic: no
-    atomics). pad_w: the image's width; y is then the inside of padded images (conv3x3's input)."""
+    """y = half(silu?(groupnorm(x))), x float or half NHWC; stats [N][G][2] float (written here; deterministic:
+    no atomics). pad_w: the image's width; y is then the inside of padded images (conv3x3's input)."""
     if C % (4 * G) or (C // 4) > 256 or 256 % (C // 4) or G > 256:
         raise ValueError(f"group_norm: {C} channels in {G} groups is not supported")
     chunks = -(-HW // 2048)
     part = gpu.empty((N, chunks, G), "f32")
-    ks = gpu.kernel("ops.metal", "gn_stats")
+    ks = gpu.kernel("ops.metal", "gn_stats", GN_IN_T=OUT_DT[x.dtype])
     kr = gpu.kernel("ops.metal", "gn_reduce")
     for p in (0, 1):
         params = pack("4ifiiii", N, HW, C, G, eps, int(silu), p, pad_w or 1, chunks)
         gpu.launch(ks, (chunks, N, 1), (256, 1, 1), [x, part, stats], params)
         gpu.launch(kr, (-(-N * G // 64), 1, 1), (64, 1, 1), [part, stats], params)
-    ka = gpu.kernel("ops.metal", "gn_apply", PADW=int(pad_w > 0))
+    ka = gpu.kernel("ops.metal", "gn_apply", PADW=int(pad_w > 0), GN_IN_T=OUT_DT[x.dtype])
     gpu.launch(ka, (-(-C // 256), N * HW, 1), (min(256, C), 1, 1), [x, stats, w, b, y],
                pack("4ifiiii", N, HW, C, G, eps, int(silu), 0, pad_w or 1, chunks))
 
@@ -228,26 +228,27 @@ def softmax_rows(gpu: Gpu, s: Tensor, p: Tensor, M: int, L: int, *, valid: int |
 
 
 def conv3x3(gpu: Gpu, xp: Tensor, wt: QWeight, out: Tensor, *, H: int, W: int, C: int, epi: int = 0,
-            tile=(64, 128, 4), batch: int = 1, stride: int = 1, in_hw: tuple | None = None, pad: int = 1):
+            tile=(64, 128, 4), batch: int = 1, stride: int = 1, in_hw: tuple | None = None, pad: int = 1,
+            out_channels: int | None = None):
     """out[batch*H*W][N] = 3x3 convolution of padded half images xp [batch][(Hi+2)][(Wi+2)][C] (kernels/conv.metal;
     epi 1: out += ...). H, W: the output's sides; in_hw: the input's (default H, W); pad 1 reads the border as
     the padding, pad 0 starts inside it (a strided convolution padded on its bottom and right by the border).
-    wt: [N][9C] half, taps (ky, kx, c), with a bias."""
+    wt: [N][9C] half, taps (ky, kx, c), with a bias. out (float or half, also as the residual of epi 1) holds
+    out_channels (default N) per pixel."""
     tm, tn, nsg = tile
     if C % 32 or wt.N % tn or wt.bias is None:
         raise ValueError(f"conv3x3: {C} input channels, {wt.N} outputs, bias {wt.bias is not None}")
     hi, wi = in_hw or (H, W)
-    out_t = OUT_DT[out.dtype] if epi == 0 else "float"
-    k = gpu.kernel("conv.metal", "conv3x3", TM=tm, TN=tn, NSG=nsg, EPI=epi, OUT_T=out_t)
+    k = gpu.kernel("conv.metal", "conv3x3", TM=tm, TN=tn, NSG=nsg, EPI=epi, OUT_T=OUT_DT[out.dtype])
     gpu.launch(k, (wt.N // tn, batch * H * -(-W // tm), 1), (32 * nsg, 1, 1), [xp, wt.w, out, wt.bias],
-               pack("10i", H, W, C, wt.N, wt.K, batch, stride, hi + 2, wi + 2, 1 - pad))
+               pack("11i", H, W, C, wt.N, wt.K, batch, stride, hi + 2, wi + 2, 1 - pad, out_channels or wt.N))
 
 
 def pad_half(gpu: Gpu, x: Tensor, xp: Tensor, *, H: int, W: int, C: int, up: int = 1, batch: int = 1,
              reflect: bool = False):
-    """xp = the padded half images of x [batch][H/up][W/up][C] (float) upsampled up times by nearest neighbour,
-    bordered with zeros or (reflect) the images' reflection."""
-    k = gpu.kernel("conv.metal", "pad_half")
+    """xp = the padded half images of x [batch][H/up][W/up][C] (float or half) upsampled up times by nearest
+    neighbour, bordered with zeros or (reflect) the images' reflection."""
+    k = gpu.kernel("conv.metal", "pad_half", PAD_IN_T=OUT_DT[x.dtype])
     n = batch * (H + 2) * (W + 2) * (C // 4)
     gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, xp], pack("6i", H, W, C, up, batch, int(reflect)))
 
