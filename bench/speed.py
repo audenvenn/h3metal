@@ -1,7 +1,10 @@
 """End-to-end speed: h3metal against another implementation on the same prompt, size and seed.
 
-Every run is a fresh process (as a user would run it), timed by wall clock;
-peak memory is the process's maximum resident set size (/usr/bin/time -l).
+Every run is a fresh process (as a user would run it), timed by wall clock.
+Memory is the peak physical footprint the kernel records for the process
+(/usr/bin/time -l, "peak memory footprint"; for an implementation that runs
+its stages in child processes, the largest child's maximum resident set is
+recorded as well).
 Runs alternate between the implementations, so thermal drift hits all of
 them alike, and the machine cools down between runs.
 
@@ -26,11 +29,13 @@ def run(cmd: list[str]) -> dict:
     t = time.time()
     p = subprocess.run(["/usr/bin/time", "-l"] + cmd, capture_output=True, text=True)
     wall = time.time() - t
-    rss = 0
+    rss = foot = 0
     for line in p.stderr.splitlines():
         if "maximum resident set size" in line:
             rss = int(line.split()[0])
-    return {"wall": wall, "rss_gb": rss / 1e9, "ok": p.returncode == 0,
+        if "peak memory footprint" in line:
+            foot = int(line.split()[0])
+    return {"wall": wall, "rss_gb": rss / 1e9, "footprint_gb": foot / 1e9, "ok": p.returncode == 0,
             "stdout": p.stdout[-2000:], "stderr": p.stderr[-2000:] if p.returncode else ""}
 
 
@@ -62,7 +67,8 @@ def main():
                 res = run(cmd)
                 res.update({"impl": name, "size": size, "run": r})
                 results.append(res)
-                print(f"{name:8s} {size}x{size} run {r}: {res['wall']:.1f} s, peak RSS {res['rss_gb']:.1f} GB"
+                print(f"{name:8s} {size}x{size} run {r}: {res['wall']:.1f} s, peak footprint "
+                      f"{res['footprint_gb']:.2f} GB, max RSS {res['rss_gb']:.2f} GB"
                       f"{'' if res['ok'] else ' FAILED'}", flush=True)
                 if not res["ok"]:
                     print(res["stderr"], file=sys.stderr)
