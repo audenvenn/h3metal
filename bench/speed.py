@@ -106,13 +106,14 @@ def main():
     ap.add_argument("--h3metal", required=True, help="command prefix; -p/-s/--seed/-o are appended")
     ap.add_argument("--other", help="command prefix for the other implementation (h3-image-mlx syntax)")
     ap.add_argument("--cooldown", type=float, default=60.0)
+    ap.add_argument("--warmup", action="store_true", help="one unrecorded run of each implementation per size first")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     results = []
     tmp = tempfile.mkdtemp()
     n = 0
     for size in [int(s) for s in a.sizes.split(",")]:
-        for r in range(a.runs):
+        for r in range(-1 if a.warmup else 0, a.runs):
             n += 1
             prompt = f"{a.prompt} Variation {time.time_ns() % 10**9}." if a.cold else a.prompt
             jobs = [("h3metal", shlex.split(a.h3metal) + ["-p", prompt, "-s", f"{size}x{size}", "--seed", str(a.seed),
@@ -127,8 +128,9 @@ def main():
                 time.sleep(a.cooldown)
                 res = run(cmd)
                 res.update({"impl": name, "size": size, "run": r, "cold": a.cold})
-                results.append(res)
-                print(f"{name:8s} {size}x{size} run {r}: {res['wall']:.1f} s, peak footprint "
+                if r >= 0:
+                    results.append(res)
+                print(f"{name:8s} {size}x{size} {'warm-up' if r < 0 else f'run {r}'}: {res['wall']:.1f} s, peak footprint "
                       f"{res['footprint_gb']:.2f} GB (process tree {res['tree_gb']:.2f} GB)"
                       f"{'' if res['ok'] else ' FAILED'}", flush=True)
                 if not res["ok"]:
