@@ -155,7 +155,7 @@ modules (relative L2 error of the output):
 | Text encoder | real weights, nine prompts, against float32 | 0.37% |
 | Vision tower | real weights | 1.1% |
 | VAE encoder | real weights | 0.28% |
-| VAE decoder | real weights, against float32 | 79.6 dB PSNR |
+| VAE decoder | real weights, against float32 | 79.1 dB PSNR |
 
 An edit's inputs (tokens, rotary positions, the packed sequence) are
 identical to the official pipeline's. On the real weights the three formats
