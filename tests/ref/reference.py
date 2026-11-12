@@ -158,6 +158,17 @@ def edit_text_encoder(W, prompt, image_path, dev, dtype):
     return ids, tags, emb
 
 
+def _chunked_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, backend=None,
+                       parallel_config=None, chunk=1024, **kwargs):
+    """The official blocks' attention (query, key, value [B][S][H][D]) in chunks of query rows: the same math, each
+    row's softmax being its own, without a [heads][S][S] score matrix that at 2048 x 2048 outgrows memory."""
+    assert attn_mask is None and not is_causal and dropout_p == 0.0
+    q, k, v = (x.permute(0, 2, 1, 3) for x in (query, key, value))
+    out = torch.cat([torch.nn.functional.scaled_dot_product_attention(q[:, :, i:i + chunk], k, v)
+                     for i in range(0, q.shape[2], chunk)], 2)
+    return out.permute(0, 2, 1, 3)
+
+
 def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
     cfgj = json.load(open(os.path.join(W, "transformer_diffusers", "config.json")))
     cfgj = {k: v for k, v in cfgj.items() if not k.startswith("_")}
@@ -181,6 +192,7 @@ def dit_denoise(W, emb, lat_h, lat_w, noise, dev, dtype, log):
     for n, p in model.named_parameters():  # keep the checkpoint's mixed precision
         if not n.startswith(("proj_in", "time_embedder", "pdd_proj_out")):
             p.data = p.data.to(dtype)
+    tm.dispatch_attention_fn = _chunked_attention
     block = tm.MiniMaxH3ImageTransformerBlock(cfgj["hidden_size"], H, HD, cfgj["ffn_dim"], cfgj["time_embed_dim"],
                                               cfgj["norm_eps"], cfgj["qk_norm_eps"]).to(dev, dtype).eval()
     sig = [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0]
