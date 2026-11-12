@@ -54,6 +54,8 @@ h3metal generate -p PROMPT [-s SIZE] [--seed N] [-n COUNT] [-o OUT.png] [-i REF.
   a repeated prompt skips the text encoder.
 - `-i` makes it an edit. Repeat it for several references and name them
   `<Picture 1>`, `<Picture 2>`, ... in the prompt.
+- The very first run compiles the Metal kernels, which adds a few seconds;
+  macOS caches them for later runs.
 
 From Python:
 
