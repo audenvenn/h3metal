@@ -43,6 +43,7 @@ def noise(seed: int, shape) -> np.ndarray:
 
 class Pipeline:
     def __init__(self, model_dir: str, gpu: Gpu | None = None, log=print):
+        model_dir = os.path.expanduser(model_dir)
         self.dir = model_dir
         self.gpu = gpu or Gpu()
         self.log = log
@@ -150,6 +151,12 @@ class Pipeline:
         wf.close()
         timing.add("decode", time.time() - t)
         return img
+
+    def edit(self, prompt: str, images, width: int = 2048, height: int = 2048, seed: int = 0,
+             min_area: int = DEFAULT_MIN_AREA, progress=None):
+        """Edit with reference images (PIL images), named <Picture 1>, <Picture 2>, ... in the prompt.
+        -> (uint8 image [H][W][3], Timing)."""
+        return generate_edit(self, prompt, images, width, height, seed, min_area, progress)
 
     def generate(self, prompt: str, width: int = 2048, height: int = 2048, seed: int = 0,
                  min_area: int = DEFAULT_MIN_AREA, progress=None, latents: np.ndarray | None = None):
