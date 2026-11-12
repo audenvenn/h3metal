@@ -314,7 +314,14 @@ class ZImageDiT:
 
 
 def _ztile(w, M: int) -> dict:
-    """Tiles for Z-Image's products (no K split: they store their result instead of accumulating it)."""
+    """Tiles for Z-Image's products, from an interleaved sweep of checked candidates on an M6 at 1024 x 1024 and
+    2048 x 2048 (int8: 32 x 256 tiles for the products of 3,840 inputs and for the MLP down-projection, 37 and
+    35 TOPS; 64 x 128 tiles swept four row tiles at a time for the MLP up-projection, 38-39 TOPS). No K split:
+    these products store their result instead of accumulating it."""
+    if w.fmt == "q8":
+        if w.K < 7000 and w.N >= 16384:   # MLP up
+            return {"tile": (64, 128, 4), "swz": 4}
+        return {"tile": (32, 256, 4)}
     t = _tile(w, M)
     t.pop("ksplit", None)
     return t
