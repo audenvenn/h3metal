@@ -165,7 +165,7 @@ class DiT:
         a8, sa = b["a8"], b["sa"]
         ops.norm_mod_q8(g, x, mod1, rt, a8.view((Sp, D)), sa, S, D, eps=eps, mod_stride=mod_stride)
         qkv = b["wide"].view((Sp, 3 * inner))
-        ops.gemm(g, a8.view((Sp, D)), blk["qkv"], qkv, S, sa=sa, **_tile(blk["qkv"]))
+        ops.gemm(g, a8.view((Sp, D)), blk["qkv"], qkv, S, sa=sa, **_tile(blk["qkv"], S))
         q8 = self.qk8 and rot > 0  # the refiner's text-only attention stays in half precision
         Qb = b["Q"] if not q8 else b["Q"].view(b["Q"].shape, "i8")
         Kb = b["K"] if not q8 else b["K"].view(b["K"].shape, "i8")
@@ -176,13 +176,13 @@ class DiT:
                       scale=hd ** -0.5, **self.attn_cfg, **sc)
         ops.rot_q8(g, b["o"], a8.view((Sp, inner)), sa, S, inner)
         ops.gemm(g, a8.view((Sp, inner)), blk["out"], x, S, sa=sa, epi=1, rtype=rt, gate=g1, g_stride=g_stride,
-                 **_tile(blk["out"]))
+                 **_tile(blk["out"], S))
         ops.norm_mod_q8(g, x, mod2, rt, a8.view((Sp, D)), sa, S, D, eps=eps, mod_stride=mod_stride)
         h = b["wide"].view((Sp, 2 * F))
-        ops.gemm(g, a8.view((Sp, D)), blk["fc1"], h, S, sa=sa, **_tile(blk["fc1"]))
+        ops.gemm(g, a8.view((Sp, D)), blk["fc1"], h, S, sa=sa, **_tile(blk["fc1"], S))
         ops.rot_q8(g, h, a8.view((Sp, F)), sa, S, F, swiglu=True)
         ops.gemm(g, a8.view((Sp, F)), blk["fc2"], x, S, sa=sa, epi=1, rtype=rt, gate=g2, g_stride=g_stride,
-                 **_tile(blk["fc2"]))
+                 **_tile(blk["fc2"], S))
 
     def encode_text(self, text: Tensor, T: int) -> Tensor:
         """Projects and refines the text-encoder hidden states [T][text_dim] (bf16) -> [T][D] float rows."""
@@ -255,11 +255,17 @@ class DiT:
         return b["vel"].numpy()[:n_img].copy()
 
 
-def _tile(w) -> dict:
-    """Tile shape and dispatch order for a weight, from measurements on an M6 (bench/gemm_bench.py)."""
-    if w.K >= 12000:  # long inner dimension (fc2): wide tiles reuse each activation tile more
-        return {"tile": (64, 256, 8)} if w.fmt == "q8" else {"tile": (32, 128, 2)}
-    if w.K <= 6000:   # qkv, fc1: sweep several row tiles per weight tile while it is cached
+def _tile(w, M: int = 4096) -> dict:
+    """Tile shape and dispatch order per product, from an interleaved sweep on an M6 (bench/gemm_bench.py)."""
+    if w.fmt == "q8":
+        if w.K >= 12000:                      # fc2
+            return {"tile": (64, 256, 8)}
+        if w.K >= 7000:                       # attention output
+            return {"tile": (32, 256, 4) if M >= 2048 else (32, 128, 2)}
+        return {"tile": (64, 256, 8), "swz": 2 if M >= 2048 else 1}   # qkv, fc1
+    if w.fmt == "q4":
+        if w.K >= 7000:                       # attention output, fc2
+            return {"tile": (32, 128, 2)}
         return {"tile": (64, 128, 4), "swz": 4}
     return {"tile": (64, 128, 4)}
 
