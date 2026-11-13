@@ -26,7 +26,8 @@ On a Mac mini with an M6 (12-core GPU, 24 GB):
 - **MiniMax-H3-Image:** a 2048 x 2048 image takes 41 s (46 s with a new
   prompt) and a 4096 x 4096 image 236 s, 2.8 and 1.9 times faster than
   [h3-image-mlx](https://github.com/Anionex/h3-image-mlx) on the same
-  machine (4.5 times at 1024 x 1024).
+  machine (4.5 times at 1024 x 1024). In two steps with pDMD's distilled
+  LoRA it takes 16 s and 85 s ([docs/few-step.md](docs/few-step.md)).
 
 Z-Image-Turbo and FLUX.2 [klein] take LoRA adapters: style adapters and
 FLUX.2's edit adapters (outpainting, object removal, ...). They are applied
@@ -50,7 +51,7 @@ The release's wheel holds the compiled GPU runtime, so nothing needs
 building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.5.1/h3metal-0.5.1-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.6.0/h3metal-0.6.0-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, ready to run: 8.3 GB
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
@@ -76,6 +77,9 @@ h3metal download                       # the official checkpoint, ~125 GB
 h3metal convert ~/.h3metal/checkpoint  # writes ~/.h3metal/model
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
 h3metal generate -p "Put <Picture 1> on a beach at dusk" -i photo.jpg -o edit.png
+
+h3metal convert ~/.h3metal/checkpoint --pdmd   # optional: 2, 3 or 4 steps with pDMD's 2-step LoRA
+h3metal generate --steps 2 -p "A red fox in fresh snow at sunrise" -o fox.png
 ```
 
 Without `--model`, `generate` uses the first of MiniMax-H3-Image,
@@ -117,10 +121,18 @@ MiniMax-H3-Image expects a detailed English description of the whole image.
 MiniMax's API expands short prompts first (H3-Image-Context-IR), and for
 text-to-image MiniMax publishes a local prompt expander,
 [MiniMax-H3-Image-PE](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image-PE).
-h3metal uses the prompt as given. For an edit, say what should stay as well
-as what should change, including the exact wording of any text in the
-picture: with only "keep all text unchanged", small lettering can come out
-redrawn.
+h3metal uses the prompt as given.
+
+MiniMax-H3-Image also runs in 2, 3 or 4 steps (`--steps`) once
+`h3metal convert ~/.h3metal/checkpoint --pdmd` has written its few-step
+transformer, with pDMD's 2-step LoRA merged into the weights. At 2048 x 2048
+two steps take 16 s instead of 42 s. The six-step model stays the default:
+its fine texture and flat illustrations come out cleaner
+([docs/few-step.md](docs/few-step.md)).
+
+For an edit, say what should stay as well as what should change, including
+the exact wording of any text in the picture: with only "keep all text
+unchanged", small lettering can come out redrawn.
 
 A web page instead of the command line:
 
@@ -180,6 +192,9 @@ Images come out as `uint8` arrays; `timing` says where the time went.
   five lane shuffles per 256 values.
 - **Flash attention** with the operands in registers, the score product in
   int8, and the output's rescale skipped whenever no row's maximum moved.
+  MiniMax-H3-Image's queries and keys get the same Hadamard rotation before
+  their int8 rounding, which leaves every score unchanged and the rounding
+  smaller.
 - **One command buffer per block** over memory-mapped weights: only the block
   that runs is pinned. The 26 GB text encoder streams from the SSD with a
   footprint of half a gigabyte, and a transformer larger than the Mac's
@@ -226,6 +241,7 @@ modules (relative L2 error of the output):
 | Transformer, `q8` (every step) | random weights | 0.13% |
 | Transformer, `mix` | random weights | 0.25% |
 | Transformer, `q4` | random weights | 0.35%; 0.26% with GPTQ |
+| Transformer, `q8` / `mix`: the token refiner, one block and the output layer | real weights, against float32 | 0.74% / 1.26% |
 | Text encoder | real weights, nine prompts, against float32 | 0.37% |
 | Vision tower | real weights | 1.1% |
 | VAE encoder | real weights | 0.28% |
@@ -434,6 +450,11 @@ another model to the engine, [docs/engine.md](docs/engine.md) lists its
 parts and the steps Z-Image took.
 
 ## Acknowledgements
+
+The 2-step mode of MiniMax-H3-Image uses the LoRA of
+[pDMD](https://arxiv.org/abs/2609.35768) (Apache-2.0, by its authors), and
+[akhaliq](https://huggingface.co/akhaliq/minimax-h3-image-pdmd-2step) first
+showed it working with MiniMax-H3-Image.
 
 The reference implementations in
 [diffusers](https://github.com/huggingface/diffusers) and

@@ -35,6 +35,24 @@ class Timing:
         return ", ".join(f"{k} {v:.1f}s" for k, v in self.stages.items()) + f" (total {self.total():.1f}s)"
 
 
+DIT_FILES = ("dit.h3m", "dit-pdmd.h3m")  # the six-step transformer, and the few-step one (convert --pdmd)
+
+
+def dit_files(model_dir: str) -> dict:
+    """{steps: transformer file} over the files present, and None: the default (the six-step one if present)."""
+    from .weights import read_header
+    out = {}
+    for name in DIT_FILES:
+        path = os.path.join(model_dir, name)
+        if os.path.exists(path):
+            m = read_header(path)["meta"]
+            grids = m.get("schedules") or {str(len(m["timesteps"])): None}
+            for n in grids:
+                out.setdefault(int(n), path)
+            out.setdefault(None, path)
+    return out
+
+
 def noise(seed: int, shape) -> np.ndarray:
     """Standard normal noise: the draws of the official pipeline's torch CPU generator for this seed."""
     from .rng import TorchRandn
@@ -48,6 +66,9 @@ class Pipeline:
         self.gpu = gpu or Gpu()
         self.log = log
         self.paths = {k: os.path.join(model_dir, f"{k}.h3m") for k in ("te", "dit", "vae", "vision")}
+        self.dits = dit_files(model_dir)
+        if self.dits:
+            self.paths["dit"] = self.dits[None]
         for k in ("te", "dit", "vae"):
             if not os.path.exists(self.paths[k]):
                 raise FileNotFoundError(f"missing {self.paths[k]}: `h3metal download --model flux2-klein-4b` (or "
@@ -94,11 +115,23 @@ class Pipeline:
             _store(path, bf16_bits(emb))
         return emb
 
-    def _dit(self, timing: Timing):
-        """The transformer, mapped once and kept for the following requests."""
+    def steps_path(self, steps: int | None) -> str:
+        """The transformer file that runs a grid of that many steps (None: the default one)."""
+        if steps not in self.dits:
+            have = sorted(n for n in self.dits if n is not None)
+            hint = (" (2, 3 and 4 steps: `h3metal convert --pdmd`)" if not any(n < 6 for n in have) else "")
+            raise ValueError(f"MiniMax-H3-Image runs {', '.join(map(str, have))} steps here, not {steps}{hint}")
+        return self.dits[steps]
+
+    def _dit(self, timing: Timing, steps: int | None = None):
+        """The transformer for that many steps, mapped once and kept for the following requests."""
+        path = self.steps_path(steps)
+        if getattr(self, "_model", None) is not None and self._dit_path != path:
+            self.release()
         if getattr(self, "_model", None) is None:
             t = time.time()
-            self._dit_wf = WeightFile(self.gpu, self.paths["dit"])
+            self._dit_path = path
+            self._dit_wf = WeightFile(self.gpu, path)
             self._model = ditm.DiT(self.gpu, self._dit_wf)
             timing.add("load", time.time() - t)
         return self._model
@@ -113,12 +146,16 @@ class Pipeline:
 
     def denoise(self, emb: np.ndarray, lat_h: int, lat_w: int, seed: int, timing: Timing,
                 refs=None, ref_rows=None, text_types=None, latents: np.ndarray | None = None,
-                progress=None) -> np.ndarray:
+                progress=None, steps: int | None = None) -> np.ndarray:
         g = self.gpu
-        model = self._dit(timing)
+        model = self._dit(timing, steps)
+        sigmas, first = model.schedules[steps or model.default_steps]
+        n_steps = len(sigmas) - 1
         t = time.time()
         T = emb.shape[0]
-        key = (emb.shape, float(emb[0, :8].sum()), float(emb[-1, :8].sum()), refs is None)
+        # The rows depend on the transformer file too: its token refiner and text projection (pDMD's adapter
+        # changes the refiner), so a switch between files must not reuse them.
+        key = (self._dit_path, emb.shape, float(emb[0, :8].sum()), float(emb[-1, :8].sum()), refs is None)
         if getattr(self, "_rows_key", None) != key or text_types is not None:
             text = g.empty((ditm.ops.pad_rows(T, 128), emb.shape[1]), "bf16")
             text.numpy()[:T] = bf16_bits(emb)
@@ -136,13 +173,13 @@ class Pipeline:
         n_ref = lay.n_ref_rows
         cond = ref_rows if ref_rows is not None else np.zeros((0, x.shape[1]), np.float32)
         timing.add("text rows", time.time() - t)
-        for s in range(model.n_steps):
+        for s in range(n_steps):
             t = time.time()
-            v = model.step(s, rows, np.concatenate([cond, x]) if n_ref else x)
-            x = ditm.euler(x, v[n_ref:], s, model.sigmas)
+            v = model.step(first + s, rows, np.concatenate([cond, x]) if n_ref else x)
+            x = ditm.euler(x, v[n_ref:], s, sigmas, model.update)
             timing.add("denoise", time.time() - t)
             if progress:
-                progress(s + 1, model.n_steps)
+                progress(s + 1, n_steps)
         return ditm.unpatchify(x, C, lat_h, lat_w)
 
     def decode(self, lat: np.ndarray, timing: Timing) -> np.ndarray:
@@ -156,19 +193,20 @@ class Pipeline:
         return img
 
     def edit(self, prompt: str, images, width: int = 2048, height: int = 2048, seed: int = 0,
-             min_area: int = DEFAULT_MIN_AREA, progress=None):
+             min_area: int = DEFAULT_MIN_AREA, progress=None, steps: int | None = None):
         """Edit with reference images (PIL images), named <Picture 1>, <Picture 2>, ... in the prompt.
         -> (uint8 image [H][W][3], Timing)."""
-        return generate_edit(self, prompt, images, width, height, seed, min_area, progress)
+        return generate_edit(self, prompt, images, width, height, seed, min_area, progress, steps)
 
     def generate(self, prompt: str, width: int = 2048, height: int = 2048, seed: int = 0,
-                 min_area: int = DEFAULT_MIN_AREA, progress=None, latents: np.ndarray | None = None):
+                 min_area: int = DEFAULT_MIN_AREA, progress=None, latents: np.ndarray | None = None,
+                 steps: int | None = None):
         """-> (uint8 image [H][W][3], Timing). The prompt's embeddings and the transformer are kept for the next
         call, so further images of the same prompt cost the denoising and the decode only."""
         timing = Timing()
         ch, cw = ditm.canvas_size(height, width, min_area)
         emb = self.encode_prompt(prompt, timing)
-        lat = self.denoise(emb, ch // 16, cw // 16, seed, timing, latents=latents, progress=progress)
+        lat = self.denoise(emb, ch // 16, cw // 16, seed, timing, latents=latents, progress=progress, steps=steps)
         img = self.decode(lat, timing)
         out = to_image(img, width, height)
         return out, timing
@@ -272,7 +310,7 @@ def edit_inputs(pipe: "Pipeline", prompt: str, images, draws: _Draws):
 
 
 def generate_edit(pipe: "Pipeline", prompt: str, images, width: int, height: int, seed: int = 0,
-                  min_area: int = DEFAULT_MIN_AREA, progress=None):
+                  min_area: int = DEFAULT_MIN_AREA, progress=None, steps: int | None = None):
     """Edit: -> (uint8 image, Timing). The prompt refers to the references as <Picture 1>, <Picture 2>, ..."""
     from .te import TextEncoder
     timing = Timing()
@@ -297,6 +335,6 @@ def generate_edit(pipe: "Pipeline", prompt: str, images, width: int, height: int
         cond.append(ditm.patchify((tt * z + (np.float32(1) - tt) * n).astype(np.float32)))
     refs = [(z.shape[1], z.shape[2]) for z in ref_lats]
     lat = pipe.denoise(emb, lat_h, lat_w, seed, timing, refs=refs, ref_rows=np.concatenate(cond),
-                       text_types=types, latents=target, progress=progress)
+                       text_types=types, latents=target, progress=progress, steps=steps)
     img = pipe.decode(lat, timing)
     return to_image(img, width, height), timing

@@ -15,6 +15,11 @@ text encoder always runs.
     python bench/speed.py --sizes 1024,2048,4096 --runs 2 \\
         --h3metal "h3metal generate --model DIR --min-area 1024" \\
         --other "h3-image-mlx generate --models DIR" --out results.json
+
+--variant NAME=COMMAND (repeatable, h3metal's syntax) compares h3metal configurations instead, in turn:
+
+    python bench/speed.py --sizes 2048 --runs 2 --variant "6 steps=h3metal generate" \\
+        --variant "2 steps=h3metal generate --steps 2" --out steps.json
 """
 
 import argparse
@@ -103,12 +108,17 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--prompt", default=PROMPT)
     ap.add_argument("--cold", action="store_true", help="a new prompt every run: the text encoder always runs")
-    ap.add_argument("--h3metal", required=True, help="command prefix; -p/-s/--seed/-o are appended")
+    ap.add_argument("--h3metal", help="command prefix; -p/-s/--seed/-o are appended")
+    ap.add_argument("--variant", action="append", metavar="NAME=COMMAND",
+                    help="an h3metal command prefix to compare under NAME (repeat; instead of --h3metal/--other)")
     ap.add_argument("--other", help="command prefix for the other implementation (h3-image-mlx syntax)")
     ap.add_argument("--cooldown", type=float, default=60.0)
     ap.add_argument("--warmup", action="store_true", help="one unrecorded run of each implementation per size first")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    variants = [v.split("=", 1) for v in a.variant or []] or [("h3metal", a.h3metal)]
+    if not all(cmd for _, cmd in variants):
+        ap.error("give --h3metal or --variant NAME=COMMAND")
     results = []
     tmp = tempfile.mkdtemp()
     n = 0
@@ -116,14 +126,15 @@ def main():
         for r in range(-1 if a.warmup else 0, a.runs):
             n += 1
             prompt = f"{a.prompt} Variation {time.time_ns() % 10**9}." if a.cold else a.prompt
-            jobs = [("h3metal", shlex.split(a.h3metal) + ["-p", prompt, "-s", f"{size}x{size}", "--seed", str(a.seed),
-                                                         "-o", os.path.join(tmp, f"h3metal_{size}_{r}.png")])]
+            jobs = [(name, shlex.split(cmd) + ["-p", prompt, "-s", f"{size}x{size}", "--seed", str(a.seed),
+                                               "-o", os.path.join(tmp, f"{name.replace(' ', '_')}_{size}_{r}.png")])
+                    for name, cmd in variants]
             if a.other:
                 jobs.append(("other", shlex.split(a.other) + ["--prompt", prompt, "--width", str(size), "--height",
                                                              str(size), "--seed", str(a.seed), "--output",
                                                              os.path.join(tmp, f"other_{size}_{r}.png")]))
-            if n % 2 == 0:
-                jobs.reverse()
+            k = n % len(jobs)  # each run starts with the next implementation, so drift hits them alike
+            jobs = jobs[k:] + jobs[:k]
             for name, cmd in jobs:
                 time.sleep(a.cooldown)
                 res = run(cmd)

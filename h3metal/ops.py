@@ -225,10 +225,14 @@ def rot_q8(gpu: Gpu, x: Tensor, out: Tensor, sa: Tensor | None, M: int, D: int, 
 def qk_norm_rope(gpu: Gpu, qkv: Tensor, wq: Tensor | None, wk: Tensor | None, cos: Tensor | None,
                  sin: Tensor | None, Q: Tensor, K: Tensor, V: Tensor, *, M: int, Hq: int, Hk: int, Hv: int,
                  hd: int, out_rows: int, rot: int, eps: float, norm: bool = True, in_stride: int | None = None,
-                 seq_len: int | None = None, q_scale: Tensor | None = None, k_scale: Tensor | None = None):
+                 seq_len: int | None = None, q_scale: Tensor | None = None, k_scale: Tensor | None = None,
+                 qk_rot: bool = False):
+    """qk_rot (with int8 outputs): queries and keys rotated by the same orthonormal Walsh-Hadamard matrix with
+    random signs before their int8 rounding. Their products, and attention, are unchanged; the rounding loses less."""
     in_t = OUT_DT[qkv.dtype]
     nsg = 8
-    k = gpu.kernel("ops.metal", "qk_norm_rope", NSG=nsg, HDIM=hd, IN_T=in_t, QK8=int(q_scale is not None))
+    q8 = int(q_scale is not None)
+    k = gpu.kernel("ops.metal", "qk_norm_rope", NSG=nsg, HDIM=hd, IN_T=in_t, QK8=q8, QKROT=int(qk_rot and q8))
     slots = Hq + Hk + Hv
     params = pack("8ifi", M, Hq, Hk, Hv, in_stride or slots * hd, out_rows, rot, int(norm), eps, seq_len or M)
     gpu.launch(k, (M, -(-slots // nsg), 1), (32 * nsg, 1, 1), [qkv, wq, wk, cos, sin, Q, K, V, None, q_scale, k_scale],

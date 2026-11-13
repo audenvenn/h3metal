@@ -9,7 +9,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from h3metal import quant  # noqa: E402
-from h3metal.convert import schedule, timestep_embedding  # noqa: E402
+from h3metal.convert import _lora_target, flow_sigmas, lora_deltas, schedule, timestep_embedding  # noqa: E402
 from h3metal.dit import Layout, canvas_size, euler, patchify, unpatchify  # noqa: E402
 from h3metal.edit import edit_positions, vision_patches  # noqa: E402
 from h3metal.vae import split_tiles  # noqa: E402
@@ -72,6 +72,106 @@ def test_schedule():
     assert len(t) == 6 and len(s) == 7 and s[-1] == 0.0 and t[0] == 0.0
     assert np.all(np.diff(s) < 0)
     assert np.allclose(t, 1 - s[:-1])
+
+
+def test_flow_grids():
+    """The few-step grids, bit for bit those of diffusers' MiniMaxH3Scheduler (shift 12, set_timesteps(n + 1)),
+    taken from tests/ref/mini_dit_flow.py."""
+    want = {2: [0x3f800000, 0x3f6c4ec5, 0],
+            3: [0x3f800000, 0x3f75c28f, 0x3f5b6db6, 0],
+            4: [0x3f800000, 0x3f7914c2, 0x3f6c4ec5, 0x3f4ccccd, 0]}
+    for n, bits in want.items():
+        got = flow_sigmas(n, 12.0)
+        assert got.dtype == np.float32 and got.view(np.uint32).tolist() == bits, (n, got)
+    x = np.ones((3, 4), np.float32)
+    v = np.full((3, 4), 0.5, np.float32)
+    sig = flow_sigmas(2, 12.0)
+    assert np.allclose(euler(x, v, 0, sig, "blend"), euler(x, v, 0, sig), rtol=0, atol=1e-6)
+    assert np.allclose(euler(x, v, 1, sig, "blend"), x + sig[1] * v)  # the last step lands on x0
+
+
+def test_pdmd_lora_mapping():
+    """pDMD's LoRA (diffusers' module names) onto the checkpoint's tensors: QKV interleaved per head, the SwiGLU
+    halves swapped; the checkpoint's own names unchanged."""
+    from h3metal import st
+    from h3metal.lora import LoraError
+    assert _lora_target("transformer_blocks.7.attn.to_k") == ("blocks.7.attn.qkv_proj.weight", "k")
+    assert _lora_target("token_refiner.refiner_blocks.1.ff.net.0.proj") == ("token_refiner.blocks.1.mlp.fc1.weight", "swap")
+    assert _lora_target("transformer_blocks.0.attn.to_out.0") == ("blocks.0.attn.out_proj.weight", None)
+    assert _lora_target("blocks.3.mlp.fc1") == ("blocks.3.mlp.fc1.weight", None)
+    assert _lora_target("proj_out") == ("final_layer.video_out.weight", None)
+    H, hd, D, F, r = 2, 3, 4, 5, 2
+    cfg = {"num_attention_heads": H, "attention_head_dim": hd, "ffn_hidden_size": F}
+    rng = np.random.default_rng(0)
+    mats = {f"transformer_blocks.0.attn.to_{x}": (rng.standard_normal((r, D)), rng.standard_normal((H * hd, r)))
+            for x in "qkv"}
+    mats["transformer_blocks.0.ff.net.0.proj"] = (rng.standard_normal((r, D)), rng.standard_normal((2 * F, r)))
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "a.safetensors")
+        st.save(path, {f"transformer.{m}.lora_{w}.weight": np.ascontiguousarray(x, np.float32)
+                       for m, (a, b) in mats.items() for w, x in (("A", a), ("B", b))})
+        keys = ["blocks.0.attn.qkv_proj.weight", "blocks.0.mlp.fc1.weight"]
+        deltas = lora_deltas([(path, 0.5)], cfg, keys)
+        qkv = np.zeros((3 * H * hd, D), np.float32)
+        for add in deltas[keys[0]]:
+            add(qkv)
+        want = np.stack([0.5 * mats[f"transformer_blocks.0.attn.to_{x}"][1] @ mats[f"transformer_blocks.0.attn.to_{x}"][0]
+                         for x in "qkv"]).reshape(3, H, hd, D).transpose(1, 0, 2, 3).reshape(3 * H * hd, D)
+        assert np.allclose(qkv, want, atol=1e-5)
+        fc1 = np.zeros((2 * F, D), np.float32)
+        for add in deltas[keys[1]]:
+            add(fc1)
+        a, b = mats["transformer_blocks.0.ff.net.0.proj"]
+        dv = 0.5 * b @ a  # diffusers: [value; gate]
+        assert np.allclose(fc1, np.concatenate([dv[F:], dv[:F]]), atol=1e-5)
+        try:
+            lora_deltas([(path, 1.0)], cfg, keys[:1])
+            raise AssertionError("a module outside the checkpoint must be refused")
+        except LoraError as e:
+            assert "not in MiniMax-H3-Image" in str(e)
+
+
+def test_pdmd_lora_is_pinned():
+    """convert --pdmd takes the local LoRA without the network when its SHA-256 is the pinned one, and fetches it
+    otherwise."""
+    import hashlib
+    from h3metal import download
+    with tempfile.TemporaryDirectory() as d:
+        body = b"not really a LoRA"
+        saved = dict(download.PDMD)
+        calls = []
+        orig = download.download_lora
+        download.PDMD.update(dir=d, file="a.safetensors", size=len(body), sha256=hashlib.sha256(body).hexdigest())
+        download.download_lora = lambda spec, dest, log: calls.append(spec) or os.path.join(dest, "a.safetensors")
+        try:
+            with open(os.path.join(d, "a.safetensors"), "wb") as f:
+                f.write(body)
+            assert download.pdmd_lora(log=lambda *a: None) == os.path.join(d, "a.safetensors") and not calls
+            with open(os.path.join(d, "a.safetensors"), "wb") as f:
+                f.write(b"something else entirely")
+            try:
+                download.pdmd_lora(log=lambda *a: None)
+                raise AssertionError("a different file must be refused")
+            except SystemExit as e:
+                assert "SHA-256" in str(e) and calls, e
+        finally:
+            download.PDMD.clear()
+            download.PDMD.update(saved)
+            download.download_lora = orig
+
+
+def test_dit_files():
+    """Which transformer file runs how many steps: the six-step one by default, the few-step one for 2-4."""
+    from h3metal.pipeline import dit_files
+    with tempfile.TemporaryDirectory() as d:
+        Writer(os.path.join(d, "dit-pdmd.h3m"), {"kind": "dit", "timesteps": [0.0] * 9, "sigmas": [1.0, 0.9, 0.0],
+               "schedules": {"2": {"sigmas": [1.0, 0.9, 0.0], "first": 0}, "3": {"sigmas": [], "first": 2},
+                             "4": {"sigmas": [], "first": 5}}, "default_steps": 2}).close()
+        files = dit_files(d)
+        assert files[None].endswith("dit-pdmd.h3m") and sorted(k for k in files if k) == [2, 3, 4]
+        Writer(os.path.join(d, "dit.h3m"), {"kind": "dit", "timesteps": [0.0] * 6, "sigmas": [0.0] * 7}).close()
+        files = dit_files(d)
+        assert files[None].endswith("dit.h3m") and files[6].endswith("dit.h3m") and files[2].endswith("dit-pdmd.h3m")
 
 
 def test_timestep_embedding():
@@ -269,6 +369,7 @@ def test_serve_page_and_checks():
             st = json.loads(urllib.request.urlopen(url + "/state").read())
             assert st["models"] == ["Z-Image-Turbo", "MiniMax-H3-Image"] and st["default"] == "Z-Image-Turbo"
             assert st["loras"] == [{"name": "style.safetensors", "models": []}], st["loras"]  # fits no model
+            assert st["steps"] == {}, st["steps"]  # no few-step transformer
             assert json.loads(urllib.request.urlopen(url + "/history").read()) == []
             for path in ("/outputs/..%2Fsecret.png", "/outputs/missing.png", "/nothing"):
                 try:
@@ -283,7 +384,9 @@ def test_serve_page_and_checks():
                               (('{' + lo + '[{"name": "notes.txt"}]}').encode(), "no LoRA"),
                               (('{' + lo + '[{"name": "style.safetensors", "strength": 9}]}').encode(), "between"),
                               (('{"model": "MiniMax-H3-Image", ' + lo + '[{"name": "style.safetensors"}]}').encode(),
-                               "work with")):
+                               "work with"),
+                              (b'{"prompt": "x", "model": "MiniMax-H3-Image", "steps": 2}', "does not run 2 steps"),
+                              (b'{"prompt": "x", "model": "Z-Image-Turbo", "steps": 4}', "does not run 4 steps")):
                 try:
                     urllib.request.urlopen(urllib.request.Request(url + "/generate", data=body))
                     raise AssertionError(body)

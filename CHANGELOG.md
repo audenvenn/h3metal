@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
+### Added
+
+- MiniMax-H3-Image in 2, 3 or 4 steps, with pDMD's 2-step LoRA (Apache-2.0).
+  - Commands: `h3metal convert ~/.h3metal/checkpoint --pdmd` fetches the
+    adapter (2.8 GB, checked against its SHA-256) and writes the few-step
+    transformer, `dit-pdmd.h3m`, next to the six-step one. `h3metal generate
+    --steps 2` (or 3, 4) uses it, and the web page offers the step counts.
+  - Method: the adapter is merged into the weights in float32 before they
+    are quantized, so it costs nothing at run time. The transformer's own
+    output head, the grids of diffusers' MiniMaxH3Scheduler (shift 12) and
+    its Euler update replace the six-step grid and its per-step heads.
+  - Speed on an M6 Mac mini: 15.7 s at 2048 x 2048 in 2 steps instead of 41.7 s
+    in 6, and 84.6 s instead of 240.1 s at 4096 x 4096.
+  - Checks:
+    - On a mini model against diffusers' MiniMax-H3 transformer with the
+      adapter merged, the grids and the update are bit for bit the
+      scheduler's, and every step is within 0.16%.
+    - On real weights, truncated to one block, merging costs no precision
+      against float32.
+    - Details in docs/few-step.md.
+- `bench/speed.py --variant NAME=COMMAND` compares h3metal configurations.
+
+### Changed
+
+- MiniMax-H3-Image's attention rotates queries and keys by a Walsh-Hadamard
+  transform before their int8 rounding. Scores are unchanged in exact
+  arithmetic, and on real weights the transformer's error against float32
+  falls from 0.87% to 0.74%, at under 0.1% of a block's time
+  (docs/design.md).
+- `h3metal info` lists each MiniMax-H3-Image transformer file with the step
+  counts it runs.
+
 ## [0.5.1] - 2026-11-13
 
 ### Added

@@ -17,6 +17,11 @@ MODEL_NAMES = {"zimage": ZIMAGE_MODEL, "z-image": ZIMAGE_MODEL, "z-image-turbo":
                "minimax-h3": DEFAULT_MODEL, "h3": DEFAULT_MODEL}
 
 
+def _has_model(d: str) -> bool:
+    """A converted model is there: a transformer file (MiniMax-H3-Image may have only its few-step one)."""
+    return any(os.path.exists(os.path.join(d, f)) for f in ("dit.h3m", "dit-pdmd.h3m"))
+
+
 def _model_dir(name: str | None) -> str:
     """--model: a converted model's directory, or one of the names in MODEL_NAMES. Without it, the first converted
     of MiniMax-H3-Image (or H3METAL_MODEL if set), Z-Image-Turbo, FLUX.2 [klein] 4B and 9B: the model the user
@@ -26,7 +31,7 @@ def _model_dir(name: str | None) -> str:
     if "H3METAL_MODEL" in os.environ:
         return DEFAULT_MODEL
     for d in (DEFAULT_MODEL, ZIMAGE_MODEL, FLUX2_MODEL, FLUX2_9B_MODEL):
-        if os.path.exists(os.path.join(d, "dit.h3m")):
+        if _has_model(d):
             return d
     return DEFAULT_MODEL
 
@@ -128,6 +133,11 @@ def cmd_generate(a):
     loras = [parse_spec(s) for s in a.lora or []]
     if loras and model_name == "MiniMax-H3-Image":
         raise ValueError("LoRA adapters work with Z-Image-Turbo and FLUX.2 [klein]")
+    steps = {"steps": a.steps} if a.steps else {}
+    if steps and model_name != "MiniMax-H3-Image":
+        raise ValueError(f"{model_name} runs the step count it was distilled for; --steps is for MiniMax-H3-Image")
+    if steps:
+        pipe.steps_path(a.steps)  # fails before the text encoder runs if no transformer here runs that many
     w, h = a.size or ((None, None) if flux2_edit else getattr(pipe, "default_size", (2048, 2048)))
     if model_name == "MiniMax-H3-Image" and (w % 32 or h % 32):
         raise ValueError("MiniMax-H3-Image needs width and height that are multiples of 32")
@@ -140,10 +150,10 @@ def cmd_generate(a):
         elif a.image:
             refs = [_open_image(p) for p in a.image]
             img, timing = generate_edit(pipe, a.prompt, refs, w, h, seed=seed, min_area=a.min_area,
-                                        progress=_progress)
+                                        progress=_progress, **steps)
         else:
             img, timing = pipe.generate(a.prompt, w, h, seed=seed, min_area=a.min_area, progress=_progress,
-                                        **({"loras": loras} if loras else {}))
+                                        **({"loras": loras} if loras else {}), **steps)
         out = a.output or f"h3metal_{int(time.time())}.png"
         if a.count > 1:
             stem, ext = os.path.splitext(out)
@@ -151,7 +161,8 @@ def cmd_generate(a):
         ih, iw = img.shape[:2]
         _save(img, out, {"prompt": a.prompt, "seed": seed, "size": f"{iw}x{ih}", "model": model_name,
                          "references": ", ".join(os.path.basename(p) for p in a.image or []) or "none",
-                         "loras": ", ".join(f"{os.path.basename(p)}:{s:g}" for p, s in loras) or "none"})
+                         "loras": ", ".join(f"{os.path.basename(p)}:{s:g}" for p, s in loras) or "none",
+                         **({"steps": str(a.steps)} if steps else {})})
         print(f"{out}: {iw}x{ih}, seed {seed}; {timing}; wall {time.time() - (t0 if i == 0 else t1):.1f}s")
 
 
@@ -190,6 +201,8 @@ def cmd_convert(a):
         print(f"next: h3metal generate --model {'zimage' if out == ZIMAGE_MODEL else out} -p \"...\"")
         return
     a.out = _model_dir(a.out) if a.out else DEFAULT_MODEL
+    if a.pdmd:
+        return convert_pdmd(a)
     if a.dit == "auto":
         a.dit = auto_format()
         print(f"transformer format for this Mac: {a.dit} (choose another with --dit)")
@@ -216,6 +229,32 @@ def cmd_convert(a):
         from .calib import calibrate_model
         fmts = dict(zip(("qkv", "out", "fc1", "fc2"), a.dit.split(","))) if "," in a.dit else a.dit
         calibrate_model(src, a.out, fmts)
+
+
+def convert_pdmd(a):
+    """MiniMax-H3-Image's few-step transformer, dit-pdmd.h3m: pDMD's 2-step LoRA merged into the weights, converted
+    for the plain flow sampler at 2, 3 and 4 steps (shift 12), next to the six-step dit.h3m. The text encoder, VAE
+    and vision files are shared; any that are missing are converted too."""
+    from .convert import convert_dit
+    from .download import PDMD, pdmd_lora
+    if a.gptq:
+        raise ValueError("--gptq calibrates the six-step transformer; it does not apply to --pdmd")
+    if a.dit == "auto":
+        a.dit = auto_format()
+        print(f"transformer format for this Mac: {a.dit} (choose another with --dit)")
+    a.dit = FORMAT_ALIASES.get(a.dit, a.dit)
+    lora = pdmd_lora() if a.pdmd == "auto" else a.pdmd
+    shared = [p for p, f in (("vae", "vae.h3m"), ("vision", "vision.h3m"), ("te", "te.h3m"),
+                             ("tokenizer", "tokenizer.json")) if not os.path.exists(os.path.join(a.out, f))]
+    if shared:
+        a.only, a.pdmd = ",".join(shared), None
+        print(f"converting the missing {a.only} as well")
+        cmd_convert(a)
+    fmts = dict(zip(("qkv", "out", "fc1", "fc2"), a.dit.split(","))) if "," in a.dit else \
+        {k: a.dit for k in ("qkv", "out", "fc1", "fc2")}
+    convert_dit(a.src, os.path.join(a.out, "dit-pdmd.h3m"), fmts=fmts, lora=[(lora, 1.0)],
+                flow={"shift": PDMD["shift"], "steps": PDMD["steps"]})
+    print("next: h3metal generate --steps 2 -p \"...\" (3 and 4 steps look closer to the six-step model)")
 
 
 def cmd_download(a):
@@ -267,7 +306,7 @@ def cmd_serve(a):
     from .zimage import is_zimage_dir
     names = {"MiniMax-H3-Image": DEFAULT_MODEL, "Z-Image-Turbo": ZIMAGE_MODEL, "FLUX.2 [klein] 4B": FLUX2_MODEL,
              "FLUX.2 [klein] 9B": FLUX2_9B_MODEL}
-    models = {n: d for n, d in names.items() if os.path.exists(os.path.join(d, "dit.h3m"))}
+    models = {n: d for n, d in names.items() if _has_model(d)}
     default = None
     if a.model:
         d = _model_dir(a.model)
@@ -284,7 +323,7 @@ def cmd_info(a):
     _check_device(g.device)
     from .flux2 import flux2_name, is_flux2_dir
     from .zimage import is_zimage_dir
-    if a.model is None and not any(os.path.exists(os.path.join(d, "dit.h3m"))
+    if a.model is None and not any(_has_model(d)
                                    for d in (DEFAULT_MODEL, ZIMAGE_MODEL, FLUX2_MODEL, FLUX2_9B_MODEL)):
         print("no model yet: `h3metal download --model flux2-klein-4b` (or z-image-turbo) fetches one ready to run")
         return
@@ -293,14 +332,21 @@ def cmd_info(a):
     name = "Z-Image-Turbo" if is_zimage_dir(a.model) else flux2_name(a.model) if is_flux2_dir(a.model) else \
         "MiniMax-H3-Image"
     print(f"model: {name} ({a.model})")
-    for k in ("te", "dit", "vae") + (() if other else ("vision",)):
+    from .weights import read_header
+    parts = ("te", "dit", "vae") + (() if other else ("dit-pdmd", "vision"))
+    for k in parts:
         p = os.path.join(a.model, f"{k}.h3m")
         if os.path.exists(p):
-            from .weights import read_header
             m = read_header(p)["meta"]
-            print(f"{k:7s} {os.path.getsize(p) / 1e9:6.2f} GB  {m.get('fmts') or m.get('fmt', '')}")
-        else:
-            print(f"{k:7s} missing ({p})")
+            steps = ""
+            if k.startswith("dit") and not other:
+                grids = sorted(int(n) for n in (m.get("schedules") or {str(len(m["timesteps"])): 0}))
+                steps = f"  steps {', '.join(map(str, grids))}"
+            print(f"{k:8s} {os.path.getsize(p) / 1e9:6.2f} GB  {m.get('fmts') or m.get('fmt', '')}{steps}")
+        elif k == "dit-pdmd":
+            print(f"{k:8s} not converted (2, 3 and 4 steps: `h3metal convert <checkpoint> --pdmd`)")
+        elif not (k == "dit" and os.path.exists(os.path.join(a.model, "dit-pdmd.h3m"))):
+            print(f"{k:8s} missing ({p})")
 
 
 def main(argv=None):
@@ -322,6 +368,8 @@ def main(argv=None):
     g.add_argument("--lora", action="append", metavar="FILE[:STRENGTH]",
                    help="a LoRA adapter (.safetensors) for Z-Image-Turbo or FLUX.2 [klein], at a strength "
                         "(default 1); a bare name is looked up in ~/.h3metal/loras; repeat for several")
+    g.add_argument("--steps", type=int, default=None,
+                   help="MiniMax-H3-Image: 6 (default), or 2, 3 or 4 with the few-step transformer (convert --pdmd)")
     g.add_argument("--min-area", type=int, default=2048 * 2048,
                    help="smallest canvas the image is generated on (default 2048*2048, as released); "
                         "1024 generates at the requested size")
@@ -338,6 +386,9 @@ def main(argv=None):
     c.add_argument("--te", default="q8", help="text encoder weights: q8, q4g or f16")
     c.add_argument("--vae", default="f16")
     c.add_argument("--only", help="comma-separated subset of vae,vision,te,dit,tokenizer")
+    c.add_argument("--pdmd", nargs="?", const="auto", metavar="LORA",
+                   help="MiniMax-H3-Image: write the few-step transformer (2, 3 or 4 steps), dit-pdmd.h3m, with "
+                        "pDMD's 2-step LoRA merged (downloaded unless LORA names its file)")
     c.add_argument("--gptq", action="store_true",
                    help="choose the transformer's codes with GPTQ on calibration runs (about an hour on an M6)")
     c.set_defaults(func=cmd_convert)

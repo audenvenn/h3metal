@@ -62,6 +62,36 @@ WANTED = [
 ]
 
 
+# pDMD's 2-step LoRA for MiniMax-H3 (arXiv 2609.35768), which MiniMax-H3-Image takes as a one-frame video. The fp32
+# file is the training precision (the bf16 one is a rounding of it). convert --pdmd merges it.
+PDMD = {"repo": "pdmd2026/pdmd_2NFE_lora", "file": "lora_model_0_fp32.safetensors", "license": "Apache-2.0",
+        "dir": os.path.expanduser("~/.h3metal/pdmd"), "shift": 12.0, "steps": [2, 3, 4],
+        # the file h3metal was checked with (revision 3bc1bf125da7 of the repository)
+        "size": 2767276568, "sha256": "f81e52f91271ca68f6a3587a491f4089fe536d627e81eb659f62d096f1d32b16"}
+
+
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(8 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def pdmd_lora(log=print) -> str:
+    """pDMD's LoRA file: the local copy when it is the one h3metal was checked with (no network needed), otherwise
+    downloaded, and refused if Hugging Face now serves a different file."""
+    path = os.path.join(PDMD["dir"], PDMD["file"])
+    if os.path.exists(path) and os.path.getsize(path) == PDMD["size"] and _sha256(path) == PDMD["sha256"]:
+        return path
+    log(f"pDMD's 2-step LoRA ({PDMD['license']}, {PDMD['repo']}):")
+    path = download_lora(f"{PDMD['repo']}/{PDMD['file']}", dest=PDMD["dir"], log=log)
+    if _sha256(path) != PDMD["sha256"]:
+        raise SystemExit(f"{path} is not the pDMD release h3metal was checked with (its SHA-256 differs); "
+                         "pass the file you want to merge as --pdmd FILE")
+    return path
+
+
 def _json(url: str):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=60) as r:
@@ -127,11 +157,7 @@ def _fetch(item, dest: str) -> tuple[str, bool, str]:
     else:
         return path, False, "incomplete"
     if sha:
-        h = hashlib.sha256()
-        with open(part, "rb") as f:
-            while chunk := f.read(8 << 20):
-                h.update(chunk)
-        if h.hexdigest() != sha:
+        if _sha256(part) != sha:
             os.remove(part)
             return path, False, "sha256 mismatch"
     os.replace(part, target)

@@ -28,7 +28,22 @@ class Studio:
         self.lock = threading.Lock()            # one image at a time
         self.pipe = self.pipe_name = None
         self.progress = {"busy": False, "stage": "", "step": 0, "steps": 0}
+        self.steps = self.step_options()
         os.makedirs(OUT_DIR, exist_ok=True)
+
+    def step_options(self) -> dict:
+        """{model: [step counts, the default first]} for the models that run several grids: MiniMax-H3-Image with
+        its few-step transformer (convert --pdmd) next to the six-step one."""
+        from .pipeline import dit_files
+        out = {}
+        for name, d in self.models.items():
+            if name == "MiniMax-H3-Image":
+                files = dit_files(d)
+                counts = sorted((n for n in files if n is not None), reverse=True)
+                if len(counts) > 1:
+                    default = next(n for n in counts if files[n] == files[None])
+                    out[name] = [default] + [n for n in counts if n != default]
+        return out
 
     def _pipeline(self, name: str):
         from .cli import open_pipeline
@@ -116,6 +131,12 @@ class Studio:
         if images and name == "Z-Image-Turbo":
             raise ValueError("Z-Image-Turbo makes images from text only")
         loras = self._loras(req, name)
+        steps = req.get("steps")
+        if steps is not None:
+            steps = int(steps)
+            if steps not in self.steps.get(name, []):
+                raise ValueError(f"{name} does not run {steps} steps here")
+        extra = {"steps": steps} if steps else {}
         from .cli import _save
         from .pipeline import generate_edit
         refs = []
@@ -135,16 +156,17 @@ class Studio:
                                             loras=loras)
             elif refs:  # MiniMax-H3-Image
                 w, h = (w, h) if size else (2048, 2048)
-                img, timing = generate_edit(pipe, prompt, refs, w, h, seed=seed, progress=progress)
+                img, timing = generate_edit(pipe, prompt, refs, w, h, seed=seed, progress=progress, **extra)
             else:
                 w, h = (w, h) if size else getattr(pipe, "default_size", (2048, 2048))
-                img, timing = pipe.generate(prompt, w, h, seed=seed, progress=progress, loras=loras)
+                img, timing = pipe.generate(prompt, w, h, seed=seed, progress=progress, loras=loras, **extra)
         finally:
             self.progress.update(busy=False, stage="", step=0, steps=0)
         ih, iw = img.shape[:2]
         out = os.path.join(OUT_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png")
         _save(img, out, {"prompt": prompt, "seed": seed, "size": f"{iw}x{ih}", "model": name,
-                         "references": str(len(refs)) if refs else "none", "loras": _lora_text(loras)})
+                         "references": str(len(refs)) if refs else "none", "loras": _lora_text(loras),
+                         **({"steps": str(steps)} if steps else {})})
         return {"url": "/outputs/" + os.path.basename(out), "size": [iw, ih], "seed": seed, "model": name,
                 "timing": str(timing), "wall": round(time.time() - t0, 1)}
 
@@ -188,7 +210,8 @@ def make_handler(studio: Studio):
                 self._send(200, PAGE.encode(), "text/html; charset=utf-8")
             elif self.path == "/state":
                 self._json(200, {"models": list(studio.models), "default": studio.default,
-                                 "loras": studio.lora_models(), "progress": studio.progress})
+                                 "loras": studio.lora_models(), "steps": studio.steps,
+                                 "progress": studio.progress})
             elif self.path == "/history":
                 self._json(200, studio.history())
             elif self.path.startswith("/outputs/"):
@@ -290,6 +313,8 @@ button { font: inherit; border: 0; border-radius: 8px; padding: 10px 14px; curso
     <option value="1024x1024">1024 &times; 1024</option><option value="1536x1024">1536 &times; 1024</option>
     <option value="1024x1536">1024 &times; 1536</option><option value="2048x2048">2048 &times; 2048</option>
     <option value="auto">as the reference (edits)</option></select></div>
+  <label id="stepslabel" for="steps" hidden>Steps</label>
+  <div class="row" id="stepsrow" hidden><select id="steps"></select></div>
   <label for="seed">Seed</label>
   <div class="row"><input id="seed" type="number" value="0" min="0"><button class="ghost" id="rnd" title="random seed">&#x21bb;</button></div>
   <label for="lora">LoRA (files in ~/.h3metal/loras)</label>
@@ -315,9 +340,19 @@ function syncRefs() { const ok = refAllowed(); $('files').disabled = !ok; $('ref
 async function init() {
   const s = await state();
   for (const m of s.models) { const o = document.createElement('option'); o.textContent = m; $('model').appendChild(o); }
-  loras = s.loras || [];
+  loras = s.loras || []; stepOptions = s.steps || {};
   if (s.default) $('model').value = s.default;
-  syncRefs(); syncLoras(); loadHistory();
+  syncRefs(); syncLoras(); syncSteps(); loadHistory();
+}
+let stepOptions = {};
+function syncSteps() {
+  const opts = stepOptions[$('model').value] || [];
+  $('stepslabel').hidden = $('stepsrow').hidden = opts.length < 2;
+  $('steps').innerHTML = '';
+  opts.forEach((n, i) => {
+    const o = document.createElement('option'); o.value = n;
+    o.textContent = n + (i === 0 ? ' (default)' : n === Math.min(...opts) ? ' (fastest)' : ''); $('steps').appendChild(o);
+  });
 }
 let loras = [];
 function syncLoras() {
@@ -329,7 +364,7 @@ function syncLoras() {
   }
   if ([...$('lora').options].some((o) => o.value === keep)) $('lora').value = keep;
 }
-$('model').onchange = () => { syncRefs(); syncLoras(); };
+$('model').onchange = () => { syncRefs(); syncLoras(); syncSteps(); };
 $('rnd').onclick = () => { $('seed').value = Math.floor(Math.random() * 1e9); };
 $('files').onchange = async (e) => {
   refs = []; $('refs').innerHTML = '';
@@ -358,7 +393,8 @@ $('go').onclick = async () => {
   const size = $('size').value;
   const body = { model: $('model').value, prompt: $('prompt').value, seed: +$('seed').value,
                  size: size === 'auto' ? null : size.split('x').map(Number), images: refAllowed() ? refs : [],
-                 loras: $('lora').value ? [{ name: $('lora').value, strength: +$('strength').value }] : [] };
+                 loras: $('lora').value ? [{ name: $('lora').value, strength: +$('strength').value }] : [],
+                 steps: $('stepsrow').hidden ? null : +$('steps').value };
   $('go').disabled = true; $('bar').firstChild.style.width = '0'; $('status').textContent = 'starting'; poll();
   try {
     const r = await fetch('/generate', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });

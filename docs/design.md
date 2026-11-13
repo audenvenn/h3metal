@@ -109,11 +109,37 @@ The transformer runs the score product in int8: the kernel that applies the
 query/key norms and the rotary embedding also quantizes every query and key
 row to int8 with its own scale, the scores accumulate in int32 at twice the
 half-precision rate, and the two scales are applied to each block of scores
-before the softmax. P V stays in half precision. With the changes below, a
+before the softmax. P V stays in half precision. (Queries and keys are rotated
+before that rounding; see below.) With the changes below, a
 layer's attention takes 24.8 ms at 2048 x 2048 and 0.34 s at 4096 x 4096,
 where attention is almost half of a block's time: 81% and 85% of the time
 the matrix units need for the two products at their measured peaks
 (37.5 ms and 0.56 s with half-precision scores and none of the changes).
+
+Queries and keys are rotated before their int8 rounding (MiniMax-H3-Image).
+On the real weights a few channels dominate every query and key row: in the
+first block the rotary channels hold 89% of the keys' energy, and in the
+worst head the largest channel is 11 times the median one. One int8 scale per
+row then leaves the other channels coarse. The kernel multiplies queries and
+keys by the same orthonormal matrix, a 128-point Walsh-Hadamard transform
+with fixed random signs, which leaves every product q.k unchanged; afterwards
+the largest channel is twice the median. That costs about 0.05 ms per block
+at 2048 x 2048, under 0.1% of the block.
+
+On the real weights, truncated to the token refiner, the first block and the
+output layer (`tests/test_minimax_truncated.py`, base weights), the
+transformer's error against float32 goes from 0.87% to 0.74% with int8
+weights, and from 1.35% to 1.26% with the int4 MLP. With half-precision
+scores it would be 0.46%. Two other fixes were simulated on the CPU, on the
+first block's real queries, keys and values:
+- removing the keys' mean over the tokens as well (SageAttention's
+  smoothing) takes the attention output's error from 0.49% to 0.42%, but it
+  needs a second pass;
+- moving channel scale from keys to queries (SmoothQuant's migration) does
+  not help.
+
+Z-Image-Turbo and FLUX.2 [klein] keep the plain rounding until their
+comparisons with diffusers are rerun.
 
 P V in int8 does not pay on this GPU. With V in int8 (one scale per row)
 and each block of probabilities quantized per row against its largest

@@ -145,3 +145,19 @@ the main product's epilogue. Three lessons:
   adapter of the AdaLN projection moves that output, and the tables cannot
   be unfolded. The converter now keeps the output and the norm weights
   (16 MB) next to the tables.
+
+## What MiniMax-H3-Image's few-step mode added
+
+- **Several grids in one file.** The converter computes the modulation
+  tables for every step of every grid. The file's meta maps a step count to
+  its first table row (`schedules`), and `DiT.step` takes that row, so one
+  file serves 2, 3 and 4 steps at the cost of their tables.
+- **The update belongs to the file.** The six-step heads were distilled with
+  the Euler update in its velocity form, and the flow scheduler evaluates it
+  as an x_t / x0 blend. The two differ in rounding only, but the meta
+  records which one a file's sampler uses (`update`).
+- **Merge what is used at one strength.** pDMD's adapter changes what the
+  model is, at strength 1.0. `convert_dit(lora=...)` adds it to the
+  checkpoint's matrices in float32, through the checkpoint's own layout,
+  before they are quantized. Style adapters, used at any strength, stay
+  low-rank terms (above).
