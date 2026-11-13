@@ -504,7 +504,8 @@ class ZImagePipeline:
         self.paths = {k: os.path.join(model_dir, f"{k}.h3m") for k in ("te", "dit", "vae")}
         for k, p in self.paths.items():
             if not os.path.exists(p):
-                raise FileNotFoundError(f"missing {p}: convert a Z-Image checkpoint with `h3metal convert` first")
+                raise FileNotFoundError(f"missing {p}: `h3metal download --model z-image-turbo` fetches it ready to "
+                                        "run (or convert a checkpoint with `h3metal convert`)")
         self.tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
         self._te_cache: dict[str, np.ndarray] = {}
         self._dit = self._dit_wf = None

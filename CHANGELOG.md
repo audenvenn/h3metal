@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-13
+
+### Added
+
+- `h3metal download --model flux2-klein-4b` and `--model z-image-turbo`
+  fetch h3metal's converted weights from Hugging Face, ready to run.
+  - FLUX.2 [klein] 4B: 8.3 GB instead of a 15 GB checkpoint and a
+    conversion.
+  - Z-Image-Turbo: 10.7 GB instead of 33 GB.
+  - The repositories are audenvenn/h3metal-flux2-klein-4b and
+    audenvenn/h3metal-z-image-turbo, at tag h3m-1, the layout this version
+    reads. They hold the bytes `h3metal convert` makes with its default
+    settings, and every file is checked against its SHA-256.
+  - `--original` fetches the official checkpoints as before. While a
+    converted copy is not published, `download` falls back to them.
+
 ## [0.5.0] - 2026-11-13
 
 ### Added
@@ -165,7 +181,8 @@ All notable changes to this project are documented here. The format follows
   check of a converted text encoder, and benchmarks of every kernel, of
   image quality and of end-to-end speed against another implementation.
 
-[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/audenvenn/h3metal/releases/tag/v0.5.1
 [0.5.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.5.0
 [0.4.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.4.0
 [0.3.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.3.0

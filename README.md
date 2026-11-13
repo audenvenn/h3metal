@@ -22,6 +22,7 @@ On a Mac mini with an M6 (12-core GPU, 24 GB):
   out nearly the same picture as the official pipeline.
 - **FLUX.2 [klein] 4B:** a 1024 x 1024 image takes 7.4 s from a new prompt,
   2.3 times faster than mflux.
+- **FLUX.2 [klein] 9B:** 14.1 s, also 2.3 times faster than mflux.
 - **MiniMax-H3-Image:** a 2048 x 2048 image takes 41 s (46 s with a new
   prompt) and a 4096 x 4096 image 236 s, 2.8 and 1.9 times faster than
   [h3-image-mlx](https://github.com/Anionex/h3-image-mlx) on the same
@@ -38,24 +39,35 @@ See [Performance](#performance) and [Image quality](#image-quality).
 
 Needs a Mac with Apple silicon and Metal 4 (macOS 26 or later) and Python
 3.10+. The `python3` that comes with macOS is 3.9: use a newer one, from
-python.org, Homebrew or uv. The matrix units h3metal is built for are in M5-
-and M6-class GPUs; it is developed and measured on an M6. The release's
-wheel holds the compiled GPU runtime, so nothing needs building:
+python.org, Homebrew or uv.
+
+h3metal is built for the matrix units of M5- and M6-class GPUs, and it is
+developed and measured on an M6. Earlier Apple GPUs (M1-M4) have no matrix
+units. There h3metal warns, and it may run slowly or not at all: it is not
+tested on them.
+
+The release's wheel holds the compiled GPU runtime, so nothing needs
+building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.5.0/h3metal-0.5.0-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.5.1/h3metal-0.5.1-py3-none-macosx_26_0_arm64.whl
 
-h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, 15 GB (--source modelscope also works)
-h3metal convert ~/.h3metal/flux2-klein-4b  # int8, into ~/.h3metal/flux2-klein, about a minute
+h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, ready to run: 8.3 GB
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
-h3metal serve --open                       # or a web page
+h3metal serve --open                      # or a web page
 ```
 
-Z-Image-Turbo goes the same way (`--model z-image-turbo`, 33 GB, then
-`h3metal convert ~/.h3metal/z-image-turbo`). To build from source instead,
-with the newest changes on `main`: `pip install "h3metal @
-git+https://github.com/audenvenn/h3metal"` (it needs the Xcode command line
-tools; pip fetches CMake and Ninja).
+- **Ready to run.** `download` fetches h3metal's converted weights from
+  Hugging Face: [FLUX.2 [klein] 4B](https://huggingface.co/audenvenn/h3metal-flux2-klein-4b)
+  and [Z-Image-Turbo](https://huggingface.co/audenvenn/h3metal-z-image-turbo)
+  (`--model z-image-turbo`, 10.7 GB). Every file is checked against its
+  SHA-256.
+- **Convert yourself.** `--original` fetches the official checkpoint
+  (15 GB, 33 GB; `--source modelscope` also works), and
+  `h3metal convert ~/.h3metal/flux2-klein-4b` makes the same files.
+- **Build from source**, with the newest changes on `main`:
+  `pip install "h3metal @ git+https://github.com/audenvenn/h3metal"`. It
+  needs the Xcode command line tools; pip fetches CMake and Ninja.
 
 MiniMax-H3-Image is converted on your Mac from the official checkpoint:
 
@@ -66,8 +78,9 @@ h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
 h3metal generate -p "Put <Picture 1> on a beach at dusk" -i photo.jpg -o edit.png
 ```
 
-`generate` uses MiniMax-H3-Image once it is converted, Z-Image-Turbo
-otherwise; `--model zimage` or `--model minimax-h3` picks one. Each model
+Without `--model`, `generate` uses the first of MiniMax-H3-Image,
+Z-Image-Turbo, FLUX.2 [klein] 4B and 9B that is on the Mac. `--model
+minimax-h3`, `zimage`, `flux2` or `flux2-9b` picks one. Each model
 comes with its own license: MiniMax-H3-Image's limits where and how it may
 be used, so read [The models' licenses](#the-models-licenses) before
 downloading it. `h3metal download --source modelscope` fetches from
@@ -286,8 +299,7 @@ FLUX decoder on convolutions without im2col ([how](docs/zimage.md),
 [and how to add another model](docs/engine.md)).
 
 ```sh
-h3metal download --model z-image-turbo     # 33 GB (--source modelscope also works)
-h3metal convert ~/.h3metal/z-image-turbo   # int8, 10.7 GB, into ~/.h3metal/zimage, about 2 minutes
+h3metal download --model z-image-turbo     # ready to run: 10.7 GB into ~/.h3metal/zimage
 h3metal generate --model zimage -p "A red fox sitting in fresh snow at sunrise" -o fox.png
 ```
 
@@ -316,8 +328,7 @@ is Black Forest Labs' 4 B model for text to image and edits with reference
 images, distilled to four steps.
 
 ```sh
-h3metal download --model flux2-klein-4b   # 15 GB (--source modelscope also works)
-h3metal convert ~/.h3metal/flux2-klein-4b # int8, 8.2 GB, into ~/.h3metal/flux2-klein, about a minute
+h3metal download --model flux2-klein-4b   # ready to run: 8.3 GB into ~/.h3metal/flux2-klein
 h3metal generate --model flux2 -p "A lighthouse on a rocky coast at dusk" -s 1536x1024 -o lighthouse.png
 h3metal generate --model flux2 -p "Make it a sunny afternoon" -i photo.png -o sunny.png
 ```
@@ -379,13 +390,18 @@ it.
 
 Z-Image-Turbo is licensed by Tongyi-MAI under the
 [Apache License 2.0](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo).
-`h3metal download --model z-image-turbo` fetches it from Tongyi-MAI's own
-repositories.
+`h3metal download --model z-image-turbo` fetches h3metal's converted copy
+([audenvenn/h3metal-z-image-turbo](https://huggingface.co/audenvenn/h3metal-z-image-turbo),
+under the same license, with a NOTICE of the changes). With `--original` it
+fetches the official checkpoint from Tongyi-MAI's own repositories.
 
 FLUX.2 [klein] 4B is licensed by Black Forest Labs under the
 [Apache License 2.0](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B).
-`h3metal download --model flux2-klein-4b` fetches it from Black Forest Labs'
-own repositories (or ModelScope's copy).
+`h3metal download --model flux2-klein-4b` fetches h3metal's converted copy
+([audenvenn/h3metal-flux2-klein-4b](https://huggingface.co/audenvenn/h3metal-flux2-klein-4b),
+under the same license, with a NOTICE of the changes). With `--original` it
+fetches the official checkpoint from Black Forest Labs' own repositories (or
+ModelScope's copy).
 
 FLUX.2 [klein] 9B is licensed by Black Forest Labs under the
 [FLUX Non-Commercial License v2.1](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md),

@@ -219,11 +219,30 @@ def cmd_convert(a):
 
 
 def cmd_download(a):
-    from .download import OTHER, download, download_lora
+    from .download import CONVERTED, OTHER, NotPublished, download, download_converted, download_lora
     if a.lora:
         path = download_lora(a.lora, a.source)
         print(f"next: h3metal generate ... --lora {os.path.splitext(os.path.basename(path))[0]}")
         return
+    alias = {"z-image-turbo": "zimage", "flux2-klein-4b": "flux2"}.get(a.model)
+    if a.model in CONVERTED and not a.original:
+        if a.source == "huggingface":
+            dest = os.path.abspath(os.path.expanduser(a.dest)) if a.dest else \
+                os.path.expanduser(f"~/.h3metal/{CONVERTED[a.model]['dest']}")
+            try:
+                ok = download_converted(dest, a.model, a.jobs)
+            except NotPublished as e:  # then as before: the official checkpoint, to convert
+                print(f"{e}; fetching the official checkpoint to convert instead")
+                a.dest = None
+            else:
+                if not ok:
+                    sys.exit("some files did not download; run the command again to resume")
+                default = os.path.expanduser(f"~/.h3metal/{CONVERTED[a.model]['dest']}")
+                print(f"next: h3metal generate --model {alias if dest == default else dest} -p \"...\"")
+                return
+        else:
+            print(f"converted weights are on Hugging Face only; fetching the official checkpoint from {a.source} "
+                  "to convert")
     terms = OTHER.get(a.model, {}).get("license")
     if terms and not a.accept_license:
         sys.exit(f"{a.model} is licensed under the {terms}. Read it, and pass --accept-license to download the "
@@ -265,6 +284,10 @@ def cmd_info(a):
     _check_device(g.device)
     from .flux2 import flux2_name, is_flux2_dir
     from .zimage import is_zimage_dir
+    if a.model is None and not any(os.path.exists(os.path.join(d, "dit.h3m"))
+                                   for d in (DEFAULT_MODEL, ZIMAGE_MODEL, FLUX2_MODEL, FLUX2_9B_MODEL)):
+        print("no model yet: `h3metal download --model flux2-klein-4b` (or z-image-turbo) fetches one ready to run")
+        return
     a.model = _model_dir(a.model)
     other = is_zimage_dir(a.model) or is_flux2_dir(a.model)
     name = "Z-Image-Turbo" if is_zimage_dir(a.model) else flux2_name(a.model) if is_flux2_dir(a.model) else \
@@ -281,8 +304,10 @@ def cmd_info(a):
 
 
 def main(argv=None):
+    from . import __version__
     ap = argparse.ArgumentParser(prog="h3metal", description="Image generation on Apple Silicon's GPU matrix units: "
                                  "FLUX.2 [klein], Z-Image-Turbo and MiniMax-H3-Image.")
+    ap.add_argument("--version", action="version", version=f"h3metal {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate", help="text to image, or an edit with --image")
     g.add_argument("-p", "--prompt", required=True)
@@ -316,18 +341,24 @@ def main(argv=None):
     c.add_argument("--gptq", action="store_true",
                    help="choose the transformer's codes with GPTQ on calibration runs (about an hour on an M6)")
     c.set_defaults(func=cmd_convert)
-    d = sub.add_parser("download", help="fetch the official weights h3metal converts from (about 125 GB; "
-                       "33 GB for Z-Image-Turbo, 15 GB for FLUX.2 [klein] 4B, 35 GB for 9B)")
+    d = sub.add_parser("download", help="fetch converted weights ready to run (Z-Image-Turbo 10.7 GB, FLUX.2 "
+                       "[klein] 4B 8.3 GB), or the official weights h3metal converts from (MiniMax-H3-Image about "
+                       "125 GB, FLUX.2 [klein] 9B 35 GB; --original for the others)")
     d.add_argument("dest", nargs="?", default=None,
-                   help="default ~/.h3metal/checkpoint (~/.h3metal/<model> with --model)")
+                   help="default: ~/.h3metal/zimage or ~/.h3metal/flux2-klein for converted weights, "
+                        "~/.h3metal/<model> for an official checkpoint (~/.h3metal/checkpoint for MiniMax-H3-Image)")
     d.add_argument("--model", choices=["minimax-h3", "z-image-turbo", "flux2-klein-4b", "flux2-klein-9b"],
                    default="minimax-h3")
+    d.add_argument("--original", action="store_true",
+                   help="z-image-turbo, flux2-klein-4b: the official checkpoint, to convert yourself, instead of "
+                        "the converted weights")
     d.add_argument("--lora", metavar="OWNER/NAME[/FILE]",
                    help="fetch a LoRA adapter's .safetensors file into ~/.h3metal/loras instead (from --source)")
     d.add_argument("--accept-license", action="store_true",
                    help="accept a model's own license where it asks for that (FLUX.2 [klein] 9B: the FLUX "
                         "Non-Commercial License)")
-    d.add_argument("--source", choices=["huggingface", "modelscope"], default="huggingface")
+    d.add_argument("--source", choices=["huggingface", "modelscope"], default="huggingface",
+                   help="where official checkpoints come from; converted weights are on Hugging Face only")
     d.add_argument("-j", "--jobs", type=int, default=4)
     d.set_defaults(func=cmd_download)
     v = sub.add_parser("serve", help="a local web page for making images; the model stays loaded between them")

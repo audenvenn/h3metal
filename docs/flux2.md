@@ -6,8 +6,8 @@ and released under Apache-2.0. h3metal runs it from text to image and for
 edits with one or more reference images.
 
 ```sh
-h3metal download --model flux2-klein-4b   # 15 GB of the official repository (--source modelscope works too)
-h3metal convert ~/.h3metal/flux2-klein-4b # int8, 8.2 GB, into ~/.h3metal/flux2-klein, about a minute
+h3metal download --model flux2-klein-4b   # h3metal's converted weights, ready to run: 8.3 GB
+# or: h3metal download --model flux2-klein-4b --original (15 GB), then h3metal convert ~/.h3metal/flux2-klein-4b
 h3metal generate --model flux2 -p "A lighthouse on a rocky coast at dusk" -s 1536x1024 -o lighthouse.png
 ```
 
