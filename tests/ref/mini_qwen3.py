@@ -27,7 +27,9 @@ with torch.no_grad():
     for p in model.parameters():
         p.copy_(p.to(torch.bfloat16).float())  # the checkpoint is bfloat16; the reference computes in float32
 model.to(torch.bfloat16).save_pretrained(out, safe_serialization=True)
-model = model.float()
+# Reload instead of model.float(): .to(bfloat16) also rounded the rotary inv_freq buffer, and angles from a
+# rounded inv_freq drift from the true ones in proportion to the position (0.2% x position radians).
+model = Qwen3ForCausalLM.from_pretrained(out, torch_dtype=torch.float32).eval()
 ids = torch.randint(0, 1024, (1, 77))
 with torch.no_grad():
     hs = model.model(input_ids=ids, output_hidden_states=True).hidden_states[-2]

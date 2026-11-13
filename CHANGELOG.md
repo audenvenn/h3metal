@@ -6,8 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- FLUX.2 [klein] 4B (Black Forest Labs, Apache-2.0), text to image and
+  edits from reference images: `h3metal download --model flux2-klein-4b`,
+  `h3metal convert`, `h3metal generate --model flux2 [-i REF ...]`. A 1024 x 1024 image
+  takes 7.4 s from a new prompt on an M6 Mac mini, 2.3 times faster than
+  mflux 0.24 with its own 8-bit weights. Its transformer and decoder
+  reproduce diffusers' image to 38.5 dB from the same text embeddings
+  (docs/flux2.md). An edit lands within 33.7 dB of diffusers' from the
+  same inputs.
+- The engine: LayerNorm in the fused norm-modulate-quantize kernel, text
+  encoder taps (hidden states of several layers) and padded prompts whose
+  padding attends to the prompt only, half-precision embedding and output
+  layers on the matrix units, FLUX.2's decoder (batch-norm statistics on
+  2 x 2 patches, a 1 x 1 convolution before the decoder) and the FLUX VAE's
+  encoder for reference images.
+- `h3metal serve`: a local web page for making images (models, prompt,
+  size, seed, reference images, the images made so far). The model stays
+  loaded between images. Standard library only, on 127.0.0.1 by default.
+
+### Changed
+
+- `generate` and `info` without `--model` use the first converted of
+  MiniMax-H3-Image, Z-Image-Turbo and FLUX.2 [klein]: the model the user
+  has. Before, they always looked for MiniMax-H3-Image.
+- The README opens with the three models, and its quick start with FLUX.2
+  [klein], the smallest download.
+
 ### Fixed
 
+- The Qwen3 reference scripts (tests/ref/mini_qwen3.py, mini_flux2_te.py)
+  computed their reference with a rotary inv_freq rounded to bfloat16: they
+  cast the model to bfloat16 to save it and back to float to run it, and
+  the cast rounds that buffer too, so the reference's angles drifted in
+  proportion to the position. They reload the saved model instead. Z-Image's
+  text encoder test now measures 0.43% instead of 0.51%.
 - `ops.gemm` refuses a tile whose width does not divide the product's
   columns. The grid covers whole tiles, so such a tile left the last columns
   unwritten. That, not the matrix units, is why a 32 x 512 tile once gave

@@ -38,7 +38,10 @@ kernel needs no rebuild; editing `src/` does.
 | A converted text encoder against reference embeddings, without the GPU | the converted file, reference embeddings (`tests/ref/reference.py --te-only`) | `tests/check_te_cpu.py`; on the GPU, `bench/te_quality.py` |
 | An edit's text-encoder output (vision tower, DeepStack, positions) against the official modules | GPU, a converted model, `tests/ref/reference.py --te-only --image` | `tests/test_edit_te.py` |
 | Image quality against the official pipeline | GPU, checkpoint, reference environment | `tests/ref/reference.py`, then `bench/quality.py` |
-| Speed | idle GPU, converted model | `bench/dit_layer_bench.py`, `bench/gemm_bench.py`, `bench/attn_bench.py` |
+| Z-Image-Turbo's parts against the official modules, random weights | GPU, the reference environment | `tests/ref/mini_zimage.py`, `mini_qwen3.py`, `mini_flux_vae.py`, `mini_zimage_pipe.py`, then `tests/test_zimage_mini.py`, `test_qwen3_te.py`, `test_flux_vae.py`, `test_zimage_pipe.py` |
+| FLUX.2 [klein]'s parts against the official modules, random weights | GPU, the reference environment | `tests/ref/mini_flux2.py` and `mini_flux2_sim.py` (the error quantization alone costs), `mini_flux2_te.py`, `mini_flux2_vae.py`, then `tests/test_flux2_mini.py`, `test_flux2_te.py`, `test_flux_vae.py` |
+| Z-Image-Turbo and FLUX.2 [klein] against the official pipelines, real weights | GPU, checkpoint, reference environment | `tests/ref/zimage_reference.py`, `flux2_reference.py`, then `bench/zimage_quality.py`, `bench/flux2_quality.py` |
+| Speed | idle GPU, converted model | `bench/dit_layer_bench.py`, `bench/zimage_layer_bench.py`, `bench/flux2_step_bench.py`, `bench/gemm_bench.py`, `bench/attn_bench.py` |
 
 The reference scripts import diffusers' weight conversion script; point
 `DIFFUSERS_SCRIPTS` at the `scripts/` directory of a diffusers checkout.
