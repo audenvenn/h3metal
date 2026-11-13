@@ -51,7 +51,7 @@ The release's wheel holds the compiled GPU runtime, so nothing needs
 building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.6.2/h3metal-0.6.2-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.6.3/h3metal-0.6.3-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, ready to run: 8.3 GB
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png

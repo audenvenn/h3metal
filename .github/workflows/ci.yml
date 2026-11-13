@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install test dependencies
-        run: pip install numpy ruff
+        run: pip install numpy pillow ruff
       - name: Lint
         run: ruff check .
       - name: Byte-compile all Python sources
