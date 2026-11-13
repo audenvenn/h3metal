@@ -30,18 +30,26 @@ STRIPE_BYTES = 256 << 20
 CONV_TILE = (64, 128, 8)  # conv3x3: output pixels and channels per threadgroup, SIMD-groups (swept on an M6)
 
 
-def convert_flux_vae(src: str, out: str, log=print):
-    """src: a directory with vae/config.json and vae/diffusion_pytorch_model.safetensors; the decoder only."""
+def convert_flux_vae(src: str, out: str, log=print, encoder: bool = False):
+    """src: a directory with vae/config.json and vae/diffusion_pytorch_model.safetensors; the decoder, and with
+    encoder the encoder too (reference images of FLUX.2 edits)."""
     d = os.path.join(src, "vae")
     with open(os.path.join(d, "config.json")) as f:
         cfg = json.load(f)
     st = SafeTensors(os.path.join(d, "diffusion_pytorch_model.safetensors"))
-    keep = {k: cfg[k] for k in ("block_out_channels", "layers_per_block", "latent_channels", "norm_num_groups",
-                                "scaling_factor", "shift_factor")}
+    keep = {k: cfg[k] for k in ("block_out_channels", "layers_per_block", "latent_channels", "norm_num_groups")}
+    keep["scaling_factor"] = cfg.get("scaling_factor") or 1.0  # FLUX.2's VAE normalizes with batch-norm statistics
+    keep["shift_factor"] = cfg.get("shift_factor") or 0.0
+    if "bn.running_mean" in st.keys():  # FLUX.2: latents are normalized per channel of their 2 x 2 patches
+        keep["patch"] = list(cfg.get("patch_size", [2, 2]))
+        keep["bn_eps"] = cfg.get("batch_norm_eps", 1e-4)
     w = Writer(out, {"kind": "flux-vae", "config": keep})
     for k in sorted(st.keys()):
-        if k.startswith("decoder."):
+        if k.startswith("decoder.") or (encoder and k.startswith(("encoder.", "quant_conv."))):
             w.tensor(k, np.ascontiguousarray(st.get(k), np.float32), "f32")
+        elif k in ("bn.running_mean", "bn.running_var") or (k.startswith("post_quant_conv.") and
+                                                            cfg.get("use_post_quant_conv", False)):
+            w.tensor(k, np.ascontiguousarray(st.get(k), np.float32), "f32", host_only=True)
     w.close()
     log(f"wrote {out} ({os.path.getsize(out) / 1e6:.0f} MB)")
 
@@ -53,60 +61,79 @@ class FluxVAEDecoder:
         self.cfg = c
         h = wf.host
         self.G = c["norm_num_groups"]
+        self.bn = (h("bn.running_mean").astype(np.float32), h("bn.running_var").astype(np.float32)) \
+            if "bn.running_mean" in wf else None
+        self.pq = (h("post_quant_conv.weight")[:, :, 0, 0].astype(np.float32),
+                   h("post_quant_conv.bias").astype(np.float32)) if "post_quant_conv.weight" in wf else None
 
-        def conv(name):
-            w = h(name + ".weight").astype(np.float32)
-            b = h(name + ".bias").astype(np.float32)
-            cout, cin, kh, kw = w.shape
-            m = w.transpose(0, 2, 3, 1).reshape(cout, kh * kw * cin)
-            K = -(-m.shape[1] // 32) * 32
-            N = -(-cout // 128) * 128
-            full = np.zeros((N, K), np.float16)
-            full[:cout, :m.shape[1]] = m
-            bias = np.zeros(N, np.float32)
-            bias[:cout] = b
-            return QWeight("f16", gpu.upload(full), None, N, K, bias=gpu.upload(bias)), kh, cin, cout
-
-        def lin(name, bias=None):
-            w = h(name + ".weight").astype(np.float32)
-            if w.ndim == 4:  # a 1x1 convolution stored as such
-                w = w[:, :, 0, 0]
-            b = h(name + ".bias").astype(np.float32) if bias is None else bias
-            return QWeight("f16", gpu.upload(w.astype(np.float16)), None, w.shape[0], w.shape[1],
-                           bias=gpu.upload(b.astype(np.float32)))
-
-        def norm(name):
-            return gpu.upload(h(name + ".weight").astype(np.float32)), gpu.upload(h(name + ".bias").astype(np.float32))
-
-        def resnet(p):
-            r = {"n1": norm(p + ".norm1"), "c1": conv(p + ".conv1"), "n2": norm(p + ".norm2"), "c2": conv(p + ".conv2")}
-            if p + ".conv_shortcut.weight" in wf:
-                r["sc"] = conv(p + ".conv_shortcut")
-            return r
-
-        self.conv_in = conv("decoder.conv_in")
-        self.mid = [resnet("decoder.mid_block.resnets.0"), resnet("decoder.mid_block.resnets.1")]
-        a = "decoder.mid_block.attentions.0"
-        self.attn_norm = norm(a + ".group_norm")
-        self.wq, self.wk = lin(a + ".to_q"), lin(a + ".to_k")
-        wv = h(a + ".to_v.weight").astype(np.float32)
-        bv = h(a + ".to_v.bias").astype(np.float32)
-        wo = h(a + ".to_out.0.weight").astype(np.float32)
-        # Softmax rows sum to one, so the value bias passes through the attention: fold it into to_out's bias.
-        self.wo = lin(a + ".to_out.0", bias=wo @ bv + h(a + ".to_out.0.bias").astype(np.float32))
-        self.wv_act = gpu.upload(wv.astype(np.float16))  # V^T = W_v x^T: W_v as the left operand
+        self.wf = wf
+        self.conv_in = self._conv_w("decoder.conv_in")
+        self.mid = [self._resnet_w("decoder.mid_block.resnets.0"), self._resnet_w("decoder.mid_block.resnets.1")]
+        self._attention_w("decoder.mid_block.attentions.0")
         n_up = len(c["block_out_channels"])
         self.ups = []
         for i in range(n_up):
             p = f"decoder.up_blocks.{i}"
-            res = [resnet(f"{p}.resnets.{j}") for j in range(c["layers_per_block"] + 1)]
-            up = conv(f"{p}.upsamplers.0.conv") if f"{p}.upsamplers.0.conv.weight" in wf else None
+            res = [self._resnet_w(f"{p}.resnets.{j}") for j in range(c["layers_per_block"] + 1)]
+            up = self._conv_w(f"{p}.upsamplers.0.conv") if f"{p}.upsamplers.0.conv.weight" in wf else None
             self.ups.append((res, up))
-        self.norm_out = norm("decoder.conv_norm_out")
-        self.conv_out = conv("decoder.conv_out")
+        self.norm_out = self._norm_w("decoder.conv_norm_out")
+        self.conv_out = self._conv_w("decoder.conv_out")
         self._scratch = {}
         self._ones = {}
         self.conv_tile = CONV_TILE
+
+    # -- weights -----------------------------------------------------------------------------------------------
+    def _conv_w(self, name: str, fold=None):
+        """A convolution as a half [N][kh kw cin] product with bias (N padded to 128, K to 32); fold: a following
+        1 x 1 convolution (W, b) folded in, W' = W_f W, b' = W_f b + b_f."""
+        h = self.wf.host
+        w = h(name + ".weight").astype(np.float32)
+        b = h(name + ".bias").astype(np.float32)
+        cout, cin, kh, kw = w.shape
+        m = w.transpose(0, 2, 3, 1).reshape(cout, kh * kw * cin)
+        if fold is not None:
+            m, b = fold[0] @ m, fold[0] @ b + fold[1]
+            cout = m.shape[0]
+        K = -(-m.shape[1] // 32) * 32
+        N = -(-cout // 128) * 128
+        full = np.zeros((N, K), np.float16)
+        full[:cout, :m.shape[1]] = m
+        bias = np.zeros(N, np.float32)
+        bias[:cout] = b
+        return QWeight("f16", self.gpu.upload(full), None, N, K, bias=self.gpu.upload(bias)), kh, cin, cout
+
+    def _lin_w(self, name: str, bias=None):
+        h = self.wf.host
+        w = h(name + ".weight").astype(np.float32)
+        if w.ndim == 4:  # a 1x1 convolution stored as such
+            w = w[:, :, 0, 0]
+        b = h(name + ".bias").astype(np.float32) if bias is None else bias
+        return QWeight("f16", self.gpu.upload(w.astype(np.float16)), None, w.shape[0], w.shape[1],
+                       bias=self.gpu.upload(b.astype(np.float32)))
+
+    def _norm_w(self, name: str):
+        h = self.wf.host
+        return (self.gpu.upload(h(name + ".weight").astype(np.float32)),
+                self.gpu.upload(h(name + ".bias").astype(np.float32)))
+
+    def _resnet_w(self, p: str):
+        r = {"n1": self._norm_w(p + ".norm1"), "c1": self._conv_w(p + ".conv1"), "n2": self._norm_w(p + ".norm2"),
+             "c2": self._conv_w(p + ".conv2")}
+        if p + ".conv_shortcut.weight" in self.wf:
+            r["sc"] = self._conv_w(p + ".conv_shortcut")
+        return r
+
+    def _attention_w(self, a: str):
+        h = self.wf.host
+        self.attn_norm = self._norm_w(a + ".group_norm")
+        self.wq, self.wk = self._lin_w(a + ".to_q"), self._lin_w(a + ".to_k")
+        wv = h(a + ".to_v.weight").astype(np.float32)
+        bv = h(a + ".to_v.bias").astype(np.float32)
+        wo = h(a + ".to_out.0.weight").astype(np.float32)
+        # Softmax rows sum to one, so the value bias passes through the attention: fold it into to_out's bias.
+        self.wo = self._lin_w(a + ".to_out.0", bias=wo @ bv + h(a + ".to_out.0.bias").astype(np.float32))
+        self.wv_act = self.gpu.upload(wv.astype(np.float16))  # V^T = W_v x^T: W_v as the left operand
 
     # -- helpers -----------------------------------------------------------------------------------------------
     # The matrix-product kernel runs whole 64-row tiles: every [rows][channels] buffer has room for the padded
@@ -242,7 +269,8 @@ class FluxVAEDecoder:
 
     # -- decode ----------------------------------------------------------------------------------------------
     def decode(self, z: np.ndarray) -> np.ndarray:
-        """z: the transformer's latents [16][h][w] (before the VAE's scaling) -> image [8h][8w][3] in [-1, 1].
+        """z: the transformer's latents [16][h][w] (before the VAE's scaling), or FLUX.2's [128][h/2][w/2] (2 x 2
+        patches, normalized with the VAE's batch-norm statistics) -> image [8h][8w][3] in [-1, 1].
 
         conv_in and the middle block run at the latents' size and keep float activations. The up blocks, up to
         64 times as many pixels, keep theirs in half precision (sums still in float): at 2048 x 2048 a float
@@ -250,6 +278,14 @@ class FluxVAEDecoder:
         8 bits."""
         g, c = self.gpu, self.cfg
         lat = z.astype(np.float32) / np.float32(c["scaling_factor"]) + np.float32(c["shift_factor"])
+        if self.bn is not None:  # FLUX.2: z is [C*4][h/2][w/2], normalized per channel of the 2 x 2 patches
+            mean, var = self.bn
+            lat = lat * np.sqrt(var + np.float32(c["bn_eps"]))[:, None, None] + mean[:, None, None]
+            C4, h2, w2 = lat.shape
+            lat = lat.reshape(C4 // 4, 2, 2, h2, w2).transpose(0, 3, 1, 4, 2).reshape(C4 // 4, 2 * h2, 2 * w2)
+        if self.pq is not None:  # the 1 x 1 convolution before the decoder (CPU: a few MFLOP)
+            pw, pb = self.pq
+            lat = (np.einsum("oc,chw->ohw", pw, lat) + pb[:, None, None]).astype(np.float32)
         Cl, H, W = lat.shape
         g.wait()  # the scratch buffers below are written from the host
         xin = self._buf("lat", (H * W, Cl), "f16")
@@ -294,3 +330,80 @@ def pad(m: int) -> int:
 
 def other(role: str) -> str:
     return "xb" if role == "xa" else "xa"
+
+
+class FluxVAEEncoder(FluxVAEDecoder):
+    """The FLUX VAE's encoder (FLUX.2's reference images), on the decoder's convolutions. The first levels, at up to
+    the image's full size, keep half-precision activations; the last level and the middle block, at 1/8 of each
+    side, keep float ones (the attention adds into its input in float). The 1 x 1 quant_conv is folded into
+    conv_out; the latent distribution's mean is the encoding (the pipeline's argmax)."""
+
+    def __init__(self, gpu: Gpu, wf: WeightFile):
+        self.gpu, self.wf = gpu, wf
+        c = wf.meta["config"]
+        self.cfg = c
+        h = wf.host
+        self.G = c["norm_num_groups"]
+        self.bn = (h("bn.running_mean").astype(np.float32), h("bn.running_var").astype(np.float32)) \
+            if "bn.running_mean" in wf else None
+        if "encoder.conv_in.weight" not in wf:
+            raise ValueError(f"{wf.path} has no encoder: convert the model again")
+        self.conv_in = self._conv_w("encoder.conv_in")
+        self.downs = []
+        for i in range(len(c["block_out_channels"])):
+            p = f"encoder.down_blocks.{i}"
+            res = [self._resnet_w(f"{p}.resnets.{j}") for j in range(c["layers_per_block"])]
+            down = self._conv_w(f"{p}.downsamplers.0.conv") if f"{p}.downsamplers.0.conv.weight" in wf else None
+            self.downs.append((res, down))
+        self.mid = [self._resnet_w("encoder.mid_block.resnets.0"), self._resnet_w("encoder.mid_block.resnets.1")]
+        self._attention_w("encoder.mid_block.attentions.0")
+        self.norm_out = self._norm_w("encoder.conv_norm_out")
+        q = h("quant_conv.weight")[:, :, 0, 0].astype(np.float32)
+        self.conv_out = self._conv_w("encoder.conv_out", fold=(q, h("quant_conv.bias").astype(np.float32)))
+        self._scratch = {}
+        self._ones = {}
+        self.conv_tile = CONV_TILE
+
+    def encode(self, img: np.ndarray) -> np.ndarray:
+        """img: float [H][W][3] in [-1, 1], sides multiples of 16 -> the latent mean [C][H/8][W/8] (float)."""
+        g = self.gpu
+        H, W, _ = img.shape
+        xh = self._buf("img", (H * W, 3), "f16")
+        xh.numpy()[:H * W] = img.reshape(H * W, 3).astype(np.float16)
+        C = self.conv_in[3]
+        role = "xa"
+        x = self._buf(role, (H * W, C), "f16")
+        self._conv(xh, H, W, self.conv_in, x)
+        n = len(self.downs)
+        for i, (res, down) in enumerate(self.downs):
+            for r in res:
+                x, C, role = self._resnet(r, x, role, H, W, C)
+            if down is not None:
+                xp = self._pbuf("downp", H, W, C)
+                ops.pad_half(g, x, xp, H=H, W=W, C=C)  # zeros on the bottom and right, as the reference pads
+                Ho, Wo = (H + 1 - 3) // 2 + 1, (W + 1 - 3) // 2 + 1
+                role = other(role)
+                y = self._buf(role, (Ho * Wo, down[0].N), "f32" if i + 1 == n - 1 else "f16")
+                ops.conv3x3(g, xp, down[0], y, H=Ho, W=Wo, C=C, stride=2, in_hw=(H, W), pad=0,
+                            tile=self.conv_tile if down[0].N % self.conv_tile[1] == 0 else (64, 128, 4))
+                x, H, W = y, Ho, Wo
+            g.commit()
+        x, C, role = self._resnet(self.mid[0], x, role, H, W, C)
+        self._attention(x, H, W, C)
+        x, C, role = self._resnet(self.mid[1], x, role, H, W, C)
+        hn = self._gn_pad(x, H, W, C, self.norm_out)
+        mom = self._buf("mom", (H * W, self.conv_out[0].N), "f32")
+        self._conv3(hn, H, W, self.conv_out, mom)
+        g.wait()
+        lat = self.cfg["latent_channels"]
+        return mom.numpy()[:H * W, :lat].reshape(H, W, lat).transpose(2, 0, 1).copy()
+
+    def encode_packed(self, img: np.ndarray) -> np.ndarray:
+        """FLUX.2: the latent mean in 2 x 2 patches, normalized with the batch-norm statistics -> [C*4][H/16][W/16]
+        (the rows the transformer reads for a reference image)."""
+        lat = self.encode(img)
+        C, h, w = lat.shape
+        packed = lat.reshape(C, h // 2, 2, w // 2, 2).transpose(0, 2, 4, 1, 3).reshape(C * 4, h // 2, w // 2)
+        mean, var = self.bn
+        return ((packed - mean[:, None, None]) / np.sqrt(var + np.float32(self.cfg["bn_eps"]))[:, None, None]
+                ).astype(np.float32)

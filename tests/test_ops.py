@@ -25,27 +25,28 @@ def bf16(a):
 def from_bf16(u):
     return (u.astype(np.uint32) << 16).view(np.float32)
 
-def test_norm_mod(gpu, M=37, D=5376):
+def test_norm_mod(gpu, M=37, D=5376, ln=False):
     rng = np.random.default_rng(1)
-    x = (rng.standard_normal((M, D)) * 3).astype(np.float32)
+    x = (rng.standard_normal((M, D)) * 3 + (50 if ln else 0)).astype(np.float32)  # LN: a large mean to remove
     mod = rng.standard_normal((3, 2, D)).astype(np.float32)
     rt = rng.integers(0, 3, size=M).astype(np.uint8)
     X, MOD, RT = gpu.upload(x), gpu.upload(mod), gpu.upload(rt)
     out = gpu.empty((M, D), "i8"); sa = gpu.empty((M,), "f32")
-    ops.norm_mod_q8(gpu, X, MOD, RT, out, sa, M, D, eps=1e-5)
+    ops.norm_mod_q8(gpu, X, MOD, RT, out, sa, M, D, eps=1e-5, ln=ln)
     of = gpu.empty((M, D), "f32")
-    ops.norm_mod_q8(gpu, X, MOD, RT, of, None, M, D, eps=1e-5, out_f=True)
+    ops.norm_mod_q8(gpu, X, MOD, RT, of, None, M, D, eps=1e-5, out_f=True, ln=ln)
     gpu.wait()
-    xn = x / np.sqrt((x.astype(np.float64) ** 2).mean(1, keepdims=True) + 1e-5)
+    xc = x.astype(np.float64) - (x.astype(np.float64).mean(1, keepdims=True) if ln else 0)
+    xn = xc / np.sqrt((xc ** 2).mean(1, keepdims=True) + 1e-5)
     y = xn * mod[rt, 0] + mod[rt, 1]
     assert np.abs(of.numpy() - y).max() < 1e-3 * np.abs(y).max(), "out_f"
     r = rot(y)
     got = out.numpy().astype(np.float64) * sa.numpy()[:, None]
     err = np.abs(got - r).max() / np.abs(r).max()
-    print(f"norm_mod_q8: rel err {err:.3e} (int8 step {1/127:.3e})")
+    print(f"norm_mod_q8{' LN' if ln else ''} D={D}: rel err {err:.3e} (int8 step {1/127:.3e})")
     assert err < 0.6 / 127
     oh = gpu.empty((M, D), "f16")
-    ops.norm_mod_q8(gpu, X, MOD, RT, oh, None, M, D, eps=1e-5, out_hr=True)
+    ops.norm_mod_q8(gpu, X, MOD, RT, oh, None, M, D, eps=1e-5, out_hr=True, ln=ln)
     gpu.wait()
     e2 = np.abs(oh.numpy().astype(np.float64) - r).max() / np.abs(r).max()
     print(f"norm_mod rotated half: rel err {e2:.2e}")
@@ -124,6 +125,7 @@ if __name__ == "__main__":
     gpu = Gpu()
     test_norm_mod(gpu)
     test_norm_mod(gpu, D=5120)
+    test_norm_mod(gpu, D=3072, ln=True)  # FLUX.2's LayerNorm
     test_rot(gpu)
     test_rot(gpu, D=7168, swiglu=False)
     test_qk(gpu)

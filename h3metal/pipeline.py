@@ -50,8 +50,9 @@ class Pipeline:
         self.paths = {k: os.path.join(model_dir, f"{k}.h3m") for k in ("te", "dit", "vae", "vision")}
         for k in ("te", "dit", "vae"):
             if not os.path.exists(self.paths[k]):
-                raise FileNotFoundError(f"missing {self.paths[k]}: run `h3metal download` and `h3metal convert` "
-                                        "first, or point --model at a converted model")
+                raise FileNotFoundError(f"missing {self.paths[k]}: `h3metal download --model z-image-turbo` (or "
+                                        "flux2-klein-4b, or minimax-h3) and `h3metal convert` first, or point "
+                                        "--model at a converted model")
         from tokenizers import Tokenizer
         self.tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
         self._te_cache: dict[str, np.ndarray] = {}

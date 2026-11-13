@@ -96,6 +96,12 @@ static inline float tg_max(float v, threadgroup float *tmp, ushort sg, ushort la
 #ifndef POST
 #define POST 0
 #endif
+#ifndef LN
+#define LN 0  // LayerNorm without affine (FLUX.2) instead of RMSNorm: the row's mean is subtracted first
+#endif
+#if LN && POST
+#error "LN excludes POST"
+#endif
 
 // a[m] = int8(rot(rmsnorm(x[m]) * scale'[type] + shift[type])), one threadgroup per row.
 // mod: [types][2][D] floats per row type: scale' (the norm weight times 1 + scale) and shift.
@@ -120,6 +126,9 @@ kernel void norm_mod_q8(device float *x [[buffer(0)]],
 
   float v[MAXB][8];
   float ss = 0;
+#if LN
+  float sm = 0;
+#endif
 #pragma clang loop unroll(full)
   for (int b = 0; b < MAXB; b++) {
     const int blk = sg + b * NSG;
@@ -128,12 +137,30 @@ kernel void norm_mod_q8(device float *x [[buffer(0)]],
       const float4 a = src[0], c = src[1];
       v[b][0] = a.x; v[b][1] = a.y; v[b][2] = a.z; v[b][3] = a.w;
       v[b][4] = c.x; v[b][5] = c.y; v[b][6] = c.z; v[b][7] = c.w;
-#if !POST
+#if LN
+#pragma clang loop unroll(full)
+      for (int i = 0; i < 8; i++) sm += v[b][i];
+#elif !POST
 #pragma clang loop unroll(full)
       for (int i = 0; i < 8; i++) ss += v[b][i] * v[b][i];
 #endif
     }
   }
+#if LN
+  {  // two passes over the registers: the mean first, then the variance about it (no cancellation)
+    const float mean = tg_sum<NSG>(sm, tmp, sg, lane) / float(p.D);
+#pragma clang loop unroll(full)
+    for (int b = 0; b < MAXB; b++) {
+      if (sg + b * NSG < nb) {
+#pragma clang loop unroll(full)
+        for (int i = 0; i < 8; i++) {
+          v[b][i] -= mean;
+          ss += v[b][i] * v[b][i];
+        }
+      }
+    }
+  }
+#endif
 #if POST
   {
     float yv[MAXB][8];

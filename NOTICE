@@ -8,8 +8,9 @@ licensed under the MiniMax-H3-Image Community License Agreement, Copyright ©
 2026 MiniMax. All Rights Reserved. Files that `h3metal convert` writes from
 the model are derivatives of it and remain under that agreement.
 
-h3metal also runs Z-Image-Turbo (Tongyi-MAI), which it does not include either.
-Z-Image-Turbo is licensed under the Apache License, Version 2.0.
+h3metal also runs Z-Image-Turbo (Tongyi-MAI) and FLUX.2 [klein] 4B (Black Forest
+Labs), which it does not include either. Both are licensed under the Apache
+License, Version 2.0.
 
 The images in docs/images were generated with MiniMax-H3-Image (and, where
 docs/images/README.md says so, Z-Image-Turbo) and are AI-generated.

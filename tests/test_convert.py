@@ -143,8 +143,66 @@ def test_cli_sizes_and_device_check():
     from h3metal.cli import DEFAULT_MODEL, ZIMAGE_MODEL, _model_dir
     assert _model_dir("zimage") == ZIMAGE_MODEL and _model_dir("Z-Image-Turbo") == ZIMAGE_MODEL
     assert _model_dir("minimax-h3") == DEFAULT_MODEL and _model_dir("/some/dir") == "/some/dir"
+    assert _model_dir(None) in (DEFAULT_MODEL, ZIMAGE_MODEL)  # whichever is converted, MiniMax-H3 first
     from h3metal.cli import auto_format
     assert [auto_format(g * 2**30) for g in (16, 24, 32, 64)] == ["q4", "mix", "q8", "q8"]
+
+
+def test_download_choices():
+    """Which repository and files `h3metal download` fetches for each model and source (no network: the listing
+    and the fetches are stand-ins)."""
+    from h3metal import cli, download as dl
+    real = dl._json, dl._fetch_all
+    seen = []
+    try:
+        names = ("model_index.json", "transformer/a.safetensors", "flux-2-klein-4b.safetensors", "sample.jpg")
+        dl._json = lambda url: {"Code": 200, "Data": {"Files": [{"Path": n, "Size": 1, "Type": "blob"} for n in names]}} \
+            if "modelscope" in url else {"siblings": [{"rfilename": n, "size": 1} for n in names]}
+        dl._fetch_all = lambda todo, dest, jobs, log, what: seen.append((what, dest, [f[0] for f in todo])) or True
+        cli.main(["download", "--model", "flux2-klein-4b"])
+        cli.main(["download", "--model", "z-image-turbo", "--source", "modelscope"])
+        home = os.path.expanduser("~/.h3metal")
+        assert seen[0] == ("black-forest-labs/FLUX.2-klein-4B [huggingface]", f"{home}/flux2-klein-4b",
+                           ["model_index.json", "transformer/a.safetensors"]), seen[0]  # no duplicate, no samples
+        assert seen[1][:2] == ("Tongyi-MAI/Z-Image-Turbo [modelscope]", f"{home}/z-image-turbo"), seen[1]
+    finally:
+        dl._json, dl._fetch_all = real
+
+
+def test_serve_page_and_checks():
+    """The web page's server without a GPU: the page, its state, no paths outside the outputs, input checks."""
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from h3metal import serve
+    with tempfile.TemporaryDirectory() as d:
+        serve.OUT_DIR = d
+        studio = serve.Studio({"Z-Image-Turbo": "/nonexistent"}, None)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(studio))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            assert b"h3metal studio" in urllib.request.urlopen(url + "/").read()
+            st = json.loads(urllib.request.urlopen(url + "/state").read())
+            assert st["models"] == ["Z-Image-Turbo"] and st["default"] == "Z-Image-Turbo"
+            assert json.loads(urllib.request.urlopen(url + "/history").read()) == []
+            for path in ("/outputs/..%2Fsecret.png", "/outputs/missing.png", "/nothing"):
+                try:
+                    urllib.request.urlopen(url + path)
+                    raise AssertionError(path)
+                except urllib.error.HTTPError as e:
+                    assert e.code == 404, (path, e.code)
+            for body, msg in ((b'{"prompt": ""}', "empty"), (b'{"prompt": "x", "model": "nope"}', "unknown model"),
+                              (b"not json", "not JSON")):
+                try:
+                    urllib.request.urlopen(urllib.request.Request(url + "/generate", data=body))
+                    raise AssertionError(body)
+                except urllib.error.HTTPError as e:
+                    assert e.code == 400 and msg in json.loads(e.read())["error"], (body, e.code)
+        finally:
+            httpd.shutdown()
 
 
 if __name__ == "__main__":

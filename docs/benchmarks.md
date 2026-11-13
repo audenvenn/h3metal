@@ -113,6 +113,26 @@ Commands: `bench/speed.py --sizes 1024 --runs 2 --warmup`, then `--sizes 1024 --
 "mflux-generate-z-image-turbo --model <the 8-bit copy> --base-model z-image-turbo --steps 8"`; the single runs
 are in the table.
 
+## FLUX.2 [klein] 4B, against mflux
+
+mflux 0.24.0 with its own 8-bit copy of the released model (`mflux-save --model <checkpoint> --base-model
+flux2-klein-4b --quantize 8`). Both run four transformer passes (`--steps 4 --guidance 1.0` for mflux).
+Same method as above (`bench/speed.py`: fresh processes, alternating, 60 s pauses, the h3metal command
+`h3metal generate --model flux2`), the same prompt, seed 42:
+
+| Size | h3metal | mflux | Speed-up |
+|---|---:|---:|---:|
+| 1024 x 1024, prompt seen before (2 runs after a warm-up) | 6.2 s (6.7, 5.8) | 15.3 s (15.6, 15.0) | 2.5x |
+| 1024 x 1024, new prompt every run (2 runs) | 7.4 s (7.4, 7.4) | 16.9 s (17.7, 16.2) | 2.3x |
+
+Both encode a new prompt's 512 padded tokens, so the second row compares like with like. A 1536 x 1024 image
+takes h3metal 10.5 s. The process footprints are 2.2 GB for h3metal, which maps its 8.2 GB of weight files,
+and 8.9 GB for mflux; as with Z-Image they do not compare memory like for like (above).
+
+One transformer step at 1024 x 1024 (4,608 rows with the caption) takes 1.24 s, 73% of what the matrix units
+need at their measured peaks (`bench/flux2_step_bench.py`). The products take 63% of the step, attention
+26%, the row kernels (quantization, query and key norms, the modulated norms) 8%.
+
 ## Kernels
 
 `bench/hw/mma_rate.py` measures the matrix units on register fragments,

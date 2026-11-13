@@ -139,13 +139,19 @@ class TextEncoder:
         self.half_act = act == "f16"
 
     def encode(self, ids, pos3: np.ndarray | None = None, vision: np.ndarray | None = None,
-               vision_rows: np.ndarray | None = None, deepstack: list | None = None, profile=None) -> np.ndarray:
+               vision_rows: np.ndarray | None = None, deepstack: list | None = None, profile=None,
+               taps: tuple | None = None, n_valid: int | None = None) -> np.ndarray:
         """Token ids -> the hidden states after the stored layers as float32 [T][D] (rounded to bfloat16 like
         the reference).
 
         pos3: [3][T] multimodal positions (default: text positions 0..T-1 on all three axes).
         vision: [n][D] features replacing the rows `vision_rows`; deepstack: three [n][D] arrays added to
         those rows after the first three layers.
+        taps: hidden_states indices k (the residual stream after k layers) to return instead, concatenated
+        per row [T][len(taps) D] (FLUX.2 reads three); the layers after the last tap are skipped.
+        n_valid: the first n_valid rows are the prompt and the rest padding (FLUX.2 pads to 512 tokens and
+        masks the padding as keys): a padding row attends to the n_valid prompt rows only, itself excluded,
+        as with the reference's padding mask.
         """
         g, D, Hq, Hkv, hd, F = self.gpu, self.D, self.Hq, self.Hkv, self.hd, self.F
         ids = np.asarray(ids, dtype=np.int64)
@@ -170,14 +176,22 @@ class TextEncoder:
         rt = g.empty((Tp,), "u8")
         eps = self.cfg["eps"]
         h = self.half_act
+        tapped = []
         for l, ly in enumerate(self.layers):
             ops.norm_mod_q8(g, x, ly["mod1"], rt, a.view((Tp, D)), None if h else sa, T, D, eps=eps, out_hr=h)
             qkv = wide.view((Tp, (Hq + 2 * Hkv) * hd))
             ops.gemm(g, a.view((Tp, D)), ly["qkv"], qkv, T, sa=None if h else sa)
             ops.qk_norm_rope(g, qkv, ly["q_norm"], ly["k_norm"], cos, sin, Q, K, V, M=T, Hq=Hq, Hk=Hkv, Hv=Hkv,
                              hd=hd, out_rows=Tp, rot=hd, eps=eps)
-            ops.attention(g, Q, K, V, o, Lq=T, L=T, H=Hq, KVH=Hkv, D=hd, q_rows=Tp, k_rows=Tp, scale=hd ** -0.5,
-                          causal=True, wm=8, bk=32)
+            if n_valid is None or n_valid >= T:
+                ops.attention(g, Q, K, V, o, Lq=T, L=T, H=Hq, KVH=Hkv, D=hd, q_rows=Tp, k_rows=Tp,
+                              scale=hd ** -0.5, causal=True, wm=8, bk=32)
+            else:
+                ops.attention(g, Q, K, V, o, Lq=n_valid, L=n_valid, H=Hq, KVH=Hkv, D=hd, q_rows=Tp, k_rows=Tp,
+                              scale=hd ** -0.5, causal=True, wm=8, bk=32)
+                ops.attention(g, Q.view(Q.shape, offset_elems=n_valid * hd), K, V, o.row(n_valid, T - n_valid),
+                              Lq=T - n_valid, L=n_valid, H=Hq, KVH=Hkv, D=hd, q_rows=Tp, k_rows=Tp,
+                              scale=hd ** -0.5, causal=False, wm=8, bk=32)
             ops.rot_q8(g, o, a.view((Tp, Hq * hd)), None if h else sa, T, Hq * hd, out_hr=h)
             ops.gemm(g, a.view((Tp, Hq * hd)), ly["out"], x, T, sa=None if h else sa, epi=1, rtype=rt,
                      gate=self.ones)
@@ -193,5 +207,12 @@ class TextEncoder:
                 g.commit()  # one command buffer per layer: only this layer's weights are pinned
             if profile is not None:
                 profile(l)
+            if taps and l + 1 in taps:
+                g.wait()
+                tapped.append(bf16_to_f32(bf16_bits(x.numpy()[:T])))
+                if l + 1 == max(taps):
+                    return np.concatenate(tapped, axis=1)
+        if taps:
+            raise ValueError(f"taps {taps}: only {len(self.layers)} layers are stored")
         g.wait()
         return bf16_to_f32(bf16_bits(x.numpy()[:T]))

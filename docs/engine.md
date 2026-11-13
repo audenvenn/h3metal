@@ -87,3 +87,34 @@ model.
 7. **Real weights.** Compare part by part with a reference run of the official pipeline
    (`tests/ref/zimage_reference.py`, `bench/zimage_quality.py`). Compare end to end with the best existing
    Mac implementation (`bench/speed.py --other ...`).
+
+## What FLUX.2 [klein] added
+
+FLUX.2 [klein] 4B (`h3metal/flux2.py`) took the same steps. It needed two
+engine changes: LayerNorm in `norm_mod_q8`, and text encoder taps with
+padding rows that attend to the prompt only. Four lessons for the next model:
+
+- **A small reference has to exercise the blocks.** With small random
+  weights FLUX.2's gates came out near 0.03, every block added almost
+  nothing, and the test passed at 0.01% while seeing almost none of the
+  blocks. `tests/ref/mini_flux2.py` scales the modulation to order 1 and
+  prints the blocks' share of the output (96%); check that share.
+- **Attribute a small model's error before trusting a threshold.**
+  `tests/ref/mini_flux2_sim.py` applies h3metal's rounding (rotated int8
+  weights and activations, int8 queries and keys) inside the official module
+  in float. The engine's error has to match what that rounding alone costs
+  (`tests/test_flux2_mini.py` checks 1.1 times it), so a few-percent error
+  is either explained or a bug.
+- **A reference script can be wrong too.** Casting a transformers model to
+  bfloat16 to save it, and back to float to run it, also rounds its rotary
+  `inv_freq` buffer. The reference's angles then drift with the position.
+  The text encoder test showed an error growing with the row index that no
+  kernel explained, until the reference itself was compared with a reloaded
+  model. Reload, never cast back.
+- **When the end-to-end number disagrees, measure every part against
+  float32 first.** FLUX.2's whole image matched diffusers to only 24 dB
+  while its transformer matched to 38.5 dB. A float32 text encoder on the
+  CPU showed why: the padding tokens' hidden states are fragile in any
+  rounding, the official bfloat16 one included, and h3metal's are as close
+  to float32 as the official ones (docs/flux2.md). Raising the precision
+  would have cost 4.5 GB and changed nothing.
