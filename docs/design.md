@@ -57,13 +57,16 @@ interleaved A/B runs on a warm GPU, which is what a long generation runs on:
 a quick sweep on a cool GPU ranks them differently.
 
 A sweep also has to check what it times. A 32 x 512 tile once came out
-fastest for the int8 MLP down-projection because its results were wrong
-(the matrix units' library or the kernel mishandles that shape; which one is
-not known yet). The int8 transformer's images were grainy until a
-comparison of the weight formats on real weights showed it. Now
-`tests/test_gemm.py` checks every tile and split the transformer uses, at
-its real shapes and sizes, and `ops.gemm` refuses tiles wider than 256
-columns.
+fastest for the int8 MLP down-projection because it did less work. The grid
+covers whole tiles, and the projection's 5376 output columns are 10.5 tiles
+of 512, so the last 256 columns were never written, and the residual stream
+kept its old values there. The int8 transformer's images were grainy until a
+comparison of the weight formats on real weights showed it. The matrix units
+were never the problem: wherever 512 divides the columns, 512-column tiles
+are exact, though no faster than the tiles in use (0.2-5% slower on both
+models' int8 qkv and up-projections). `ops.gemm` now refuses any tile width
+that does not divide the columns, and `tests/test_gemm.py` checks every tile
+and split the transformers use, at their real shapes and sizes.
 
 At 2048 x 2048 a whole int8 block takes 128 ms, 79% of the time the matrix
 units would need at their measured peaks. The four products take 75% of the

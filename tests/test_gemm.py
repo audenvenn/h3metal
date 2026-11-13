@@ -87,6 +87,21 @@ def check(fmt, M=200, N=256, K=512, epi=0, out_dtype="f16", seed=0, tile=(64, 12
     assert err < (2e-3 if out_dtype != "bf16" else 1e-2), err
 
 
+def check_partial_tiles_refused():
+    """The grid covers whole tiles, so a tile width that does not divide N would leave the last N % tn columns
+    unwritten (a 32 x 512 tile on 5376 columns skipped 256 of them): gemm must refuse it."""
+    gpu = Gpu()
+    for N, tn in ((5376, 512), (3840, 512), (1152, 256), (1216, 128)):
+        wt = QWeight("q8", gpu.upload(np.zeros((N, 256), np.int8)), gpu.upload(np.ones(N, np.float32)), N, 256)
+        try:
+            gemm(gpu, gpu.upload(np.zeros((64, 256), np.int8)), wt, gpu.empty((64, N), "f16"), 64,
+                 sa=gpu.upload(np.ones(64, np.float32)), tile=(32, tn, 8))
+        except ValueError:
+            continue
+        raise AssertionError(f"a {tn}-column tile on {N} columns was not refused")
+    print("tiles that do not divide N: refused")
+
+
 def check_dit_tiles(model: str = "minimax-h3"):
     """Every tile and dispatch split a transformer uses (h3metal/dit.py: _tile, h3metal/zimage.py: _ztile), at
     its real shapes and row counts (1024, 2048 and 4096 pixels square), against a float64 reference on a sample
@@ -146,6 +161,9 @@ if __name__ == "__main__":
     for fmt in ("q8", "q4", "h8", "h4"):  # K in two dispatches, accumulated into the residual
         check(fmt, epi=1, K=1024, ksplit=2)
     check("q8", epi=1, K=2048, ksplit=4, tile=(64, 256, 8))
+    check("q8", N=1024, tile=(32, 512, 8))  # wide tiles are exact where they divide N
+    check("q8", epi=1, N=1024, K=2048, ksplit=4, tile=(32, 512, 8))
+    check_partial_tiles_refused()
     check_dit_tiles()
     check_dit_tiles("z-image")
     print("ok")
