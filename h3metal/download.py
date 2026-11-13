@@ -62,6 +62,12 @@ WANTED = [
 ]
 
 
+# pDMD's 2-step LoRA for MiniMax-H3 (arXiv 2609.35768), which MiniMax-H3-Image takes as a one-frame video. The fp32
+# file is the training precision (the bf16 one is a rounding of it). convert --pdmd merges it.
+PDMD = {"repo": "pdmd2026/pdmd_2NFE_lora", "file": "lora_model_0_fp32.safetensors", "license": "Apache-2.0",
+        "dir": os.path.expanduser("~/.h3metal/pdmd"), "shift": 12.0, "steps": [2, 3, 4]}
+
+
 def _json(url: str):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=60) as r:

@@ -97,9 +97,15 @@ class DiT:
         self.D, self.H, self.hd, self.F = c["hidden"], c["heads"], c["head_dim"], c["ffn"]
         self.L = c["layers"]
         self.inner = self.H * self.hd
-        self.timesteps = wf.meta["timesteps"]
-        self.sigmas = wf.meta["sigmas"]
-        self.n_steps = len(self.timesteps)
+        m = wf.meta
+        # The sampler's grids by step count, {n: (sigmas, the first of their table entries)}, and its Euler update
+        # (h3metal/convert.py). Files from before 0.6 hold the six-step grid alone.
+        grids = m.get("schedules") or {str(len(m["timesteps"])): {"sigmas": m["sigmas"], "first": 0}}
+        self.schedules = {int(n): (g["sigmas"], int(g["first"])) for n, g in grids.items()}
+        self.default_steps = int(m.get("default_steps", len(m["timesteps"])))
+        self.update = m.get("update", "velocity")
+        self.sigmas = self.schedules[self.default_steps][0]
+        self.n_steps = self.default_steps
         lin = wf.linear
         self.blocks = [{k: lin(f"blocks.{l}.{k}") for k in ("qkv", "out", "fc1", "fc2")} |
                        {"q_norm": wf.tensor(f"blocks.{l}.q_norm"), "k_norm": wf.tensor(f"blocks.{l}.k_norm")}
@@ -317,10 +323,20 @@ def unpatchify(rows: np.ndarray, C: int, Hh: int, W: int, p: int = 2) -> np.ndar
     return np.ascontiguousarray(x.reshape(C, Hh, W))
 
 
-def euler(latents: np.ndarray, vel: np.ndarray, s: int, sigmas) -> np.ndarray:
-    """x_next = x + (sigma - sigma_next) * v, float32 (the released velocity update)."""
-    d = np.float32(np.float32(sigmas[s]) - np.float32(sigmas[s + 1]))
-    return (latents.astype(np.float32) + d * vel.astype(np.float32)).astype(np.float32)
+def euler(latents: np.ndarray, vel: np.ndarray, s: int, sigmas, form: str = "velocity") -> np.ndarray:
+    """One Euler step in float32 along the data-ward velocity. "velocity": x + (sigma - sigma_next) * v, the update
+    the six-step grid's heads were distilled with. "blend": as diffusers' MiniMaxH3Scheduler evaluates it for the
+    flow sampler, x0 = x + (1 - t) * v from the timestep t = 1 - sigma the transformer saw, then
+    r * x + (1 - r) * x0 with r = sigma_next / sigma. The two differ in rounding only."""
+    f = np.float32
+    x, v = latents.astype(np.float32), vel.astype(np.float32)
+    sig, nxt = f(sigmas[s]), f(sigmas[s + 1])
+    if form == "blend":
+        t = f(f(1) - sig)
+        x0 = x + f(f(1) - t) * v
+        r = f(nxt / sig)
+        return (r * x + f(f(1) - r) * x0).astype(np.float32)
+    return (x + f(sig - nxt) * v).astype(np.float32)
 
 
 def num_rows(h: int, w: int) -> int:
