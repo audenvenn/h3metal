@@ -39,10 +39,7 @@ class Studio:
         return self.pipe
 
     def generate(self, req: dict) -> dict:
-        from PIL import Image
-        from .cli import _save
-        from .pipeline import generate_edit
-        name = req.get("model") or self.default
+        name = req.get("model") or self.default  # the request is checked before anything heavy is imported
         if name not in self.models:
             raise ValueError(f"unknown model {name!r}")
         prompt = str(req.get("prompt", "")).strip()
@@ -51,9 +48,15 @@ class Studio:
         seed = int(req.get("seed", 0))
         size = req.get("size")
         w, h = (int(size[0]), int(size[1])) if size else (None, None)
-        refs = [Image.open(io.BytesIO(base64.b64decode(d.split(",", 1)[-1]))) for d in req.get("images") or []]
-        if refs and name == "Z-Image-Turbo":
+        images = req.get("images") or []
+        if images and name == "Z-Image-Turbo":
             raise ValueError("Z-Image-Turbo makes images from text only")
+        from .cli import _save
+        from .pipeline import generate_edit
+        refs = []
+        if images:
+            from PIL import Image
+            refs = [Image.open(io.BytesIO(base64.b64decode(d.split(",", 1)[-1]))) for d in images]
 
         def progress(step, total):
             self.progress.update(stage="denoising", step=step, steps=total)
