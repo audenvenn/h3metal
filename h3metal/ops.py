@@ -100,14 +100,15 @@ def _rows_kernel_cfg(D: int):
 
 def norm_mod_q8(gpu: Gpu, x: Tensor, mod: Tensor, rtype: Tensor, out: Tensor, sa: Tensor | None, M: int, D: int,
                 *, eps: float, mod_stride: int | None = None, x_stride: int | None = None, out_f: bool = False,
-                out_h: bool = False, out_hr: bool = False):
+                out_h: bool = False, out_hr: bool = False, y: Tensor | None = None, post: Tensor | None = None):
     """out = int8(rot(rmsnorm(x) * mod[type][0] + mod[type][1])) and its row scales (or the plain modulated
-    row as float with out_f, as half with out_h)."""
+    row as float with out_f, as half with out_h). With y and post, first x += post * rmsnorm(y) (post_norm_add
+    fused; same eps)."""
     nsg, maxb = _rows_kernel_cfg(D)
     k = gpu.kernel("ops.metal", "norm_mod_q8", NSG=nsg, MAXB=maxb, OUT_F=int(out_f), OUT_H=int(out_h),
-                   OUT_HR=int(out_hr))
+                   OUT_HR=int(out_hr), POST=int(post is not None))
     params = pack("4if", M, D, x_stride or D, mod_stride or 2 * D, eps)
-    gpu.launch(k, (M, 1, 1), (32 * nsg, 1, 1), [x, mod, rtype, out, sa], params)
+    gpu.launch(k, (M, 1, 1), (32 * nsg, 1, 1), [x, mod, rtype, out, sa, None, y, post], params, params_index=5)
 
 
 def rot_q8(gpu: Gpu, x: Tensor, out: Tensor, sa: Tensor | None, M: int, D: int, *, swiglu: bool = False,
@@ -150,7 +151,7 @@ def copy_f32(gpu: Gpu, src: Tensor, dst: Tensor, n: int):
 
 
 def layer_norm(gpu: Gpu, x: Tensor, w: Tensor, b: Tensor, out: Tensor, M: int, D: int, eps: float):
-    k = gpu.kernel("ops.metal", "layer_norm", NSG=8)
+    k = gpu.kernel("ops.metal", "layer_norm", NSG=8, LN_OUT_T=OUT_DT[out.dtype])
     gpu.launch(k, (M, 1, 1), (256, 1, 1), [x, w, b, out], pack("3if", M, D, D, eps))
 
 
@@ -160,26 +161,37 @@ def swiglu(gpu: Gpu, x: Tensor, out: Tensor, M: int, F: int):
 
 
 def im2col(gpu: Gpu, x: Tensor, col: Tensor, *, N: int, H: int, W: int, C: int, KH: int, KW: int, stride: int,
-           pad_t: int, pad_l: int, K: int):
-    """col[N*Ho*Wo][K] <- the (ky, kx, c) taps of each output pixel of an NHWC half image, reflect-padded."""
+           pad_t: int, pad_l: int, K: int, zero_pad: bool = False, row0: int = 0, rows: int | None = None):
+    """col[N*Ho*Wo][K] <- the (ky, kx, c) taps of each output pixel of an NHWC half image, reflect-padded (or
+    zero-padded). row0, rows: only output rows row0 .. row0 + rows (a stripe; Ho is then rows)."""
     Ho = (H + 2 * pad_t - KH) // stride + 1 if stride == 1 else (H + 1 - KH) // stride + 1
     Wo = (W + 2 * pad_l - KW) // stride + 1 if stride == 1 else (W + 1 - KW) // stride + 1
-    k = gpu.kernel("ops.metal", "im2col")
+    if rows is not None:
+        Ho = rows
+    k = gpu.kernel("ops.metal", "im2col", ZPAD=int(zero_pad))
     total = -(-C // 4) * KH * KW * N * Ho * Wo
     gpu.launch(k, (-(-total // 256), 1, 1), (256, 1, 1), [x, col],
-               pack("12i", N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K))
+               pack("13i", N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K, row0))
     return Ho, Wo
 
 
 def group_norm(gpu: Gpu, x: Tensor, stats: Tensor, w: Tensor, b: Tensor, y: Tensor, *, N: int, HW: int, C: int,
-               G: int = 32, eps: float = 1e-6, silu: bool = True):
-    """y = half(silu?(groupnorm(x))), x float NHWC; stats [N][G][2] float, zeroed by the caller."""
-    ks = gpu.kernel("ops.metal", "gn_stats")
+               G: int = 32, eps: float = 1e-6, silu: bool = True, pad_w: int = 0):
+    """y = half(silu?(groupnorm(x))), x float or half NHWC; stats [N][G][2] float (written here; deterministic:
+    no atomics). pad_w: the image's width; y is then the inside of padded images (conv3x3's input)."""
+    if C % (4 * G) or (C // 4) > 256 or 256 % (C // 4) or G > 256:
+        raise ValueError(f"group_norm: {C} channels in {G} groups is not supported")
+    chunks = -(-HW // 2048)
+    part = gpu.empty((N, chunks, G), "f32")
+    ks = gpu.kernel("ops.metal", "gn_stats", GN_IN_T=OUT_DT[x.dtype])
+    kr = gpu.kernel("ops.metal", "gn_reduce")
     for p in (0, 1):
-        gpu.launch(ks, (G, N, -(-HW // 64)), (1, 1, 1), [x, stats], pack("4ifii", N, HW, C, G, eps, int(silu), p))
-    ka = gpu.kernel("ops.metal", "gn_apply")
+        params = pack("4ifiiii", N, HW, C, G, eps, int(silu), p, pad_w or 1, chunks)
+        gpu.launch(ks, (chunks, N, 1), (256, 1, 1), [x, part, stats], params)
+        gpu.launch(kr, (-(-N * G // 64), 1, 1), (64, 1, 1), [part, stats], params)
+    ka = gpu.kernel("ops.metal", "gn_apply", PADW=int(pad_w > 0), GN_IN_T=OUT_DT[x.dtype])
     gpu.launch(ka, (-(-C // 256), N * HW, 1), (min(256, C), 1, 1), [x, stats, w, b, y],
-               pack("4ifii", N, HW, C, G, eps, int(silu), 0))
+               pack("4ifiiii", N, HW, C, G, eps, int(silu), 0, pad_w or 1, chunks))
 
 
 def to_half(gpu: Gpu, x: Tensor, y: Tensor, n: int):
@@ -198,3 +210,51 @@ def gelu(gpu: Gpu, x: Tensor, y: Tensor, n: int, exact: bool = False):
     """y = half(gelu(x)) over n floats; exact: the erf form, else the tanh approximation."""
     k = gpu.kernel("ops.metal", "gelu")
     gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, y], pack("2i", n, int(exact)))
+
+
+def post_norm_add(gpu: Gpu, x: Tensor, y: Tensor, post: Tensor, M: int, D: int, *, eps: float,
+                  x_stride: int | None = None):
+    """x += post * rmsnorm(y), row by row: a product's output normalized and gated into the residual stream."""
+    nsg, maxb = _rows_kernel_cfg(D)
+    k = gpu.kernel("ops.metal", "post_norm_add", NSG=nsg, MAXB=maxb)
+    params = pack("4if", M, D, x_stride or D, 0, eps)
+    gpu.launch(k, (M, 1, 1), (32 * nsg, 1, 1), [x, y, post], params)
+
+
+def softmax_rows(gpu: Gpu, s: Tensor, p: Tensor, M: int, L: int, *, valid: int | None = None, scale: float = 1.0):
+    """p[m] = half(softmax(scale * s[m][:valid])), zeros beyond valid; s float [M][L], p half [M][L]."""
+    k = gpu.kernel("ops.metal", "softmax_rows", NSG=8)
+    gpu.launch(k, (M, 1, 1), (256, 1, 1), [s, p], pack("3if", M, L, valid or L, scale))
+
+
+def conv3x3(gpu: Gpu, xp: Tensor, wt: QWeight, out: Tensor, *, H: int, W: int, C: int, epi: int = 0,
+            tile=(64, 128, 4), batch: int = 1, stride: int = 1, in_hw: tuple | None = None, pad: int = 1,
+            out_channels: int | None = None):
+    """out[batch*H*W][N] = 3x3 convolution of padded half images xp [batch][(Hi+2)][(Wi+2)][C] (kernels/conv.metal;
+    epi 1: out += ...). H, W: the output's sides; in_hw: the input's (default H, W); pad 1 reads the border as
+    the padding, pad 0 starts inside it (a strided convolution padded on its bottom and right by the border).
+    wt: [N][9C] half, taps (ky, kx, c), with a bias. out (float or half, also as the residual of epi 1) holds
+    out_channels (default N) per pixel."""
+    tm, tn, nsg = tile
+    if C % 32 or wt.N % tn or wt.bias is None:
+        raise ValueError(f"conv3x3: {C} input channels, {wt.N} outputs, bias {wt.bias is not None}")
+    hi, wi = in_hw or (H, W)
+    k = gpu.kernel("conv.metal", "conv3x3", TM=tm, TN=tn, NSG=nsg, EPI=epi, OUT_T=OUT_DT[out.dtype])
+    gpu.launch(k, (wt.N // tn, batch * H * -(-W // tm), 1), (32 * nsg, 1, 1), [xp, wt.w, out, wt.bias],
+               pack("11i", H, W, C, wt.N, wt.K, batch, stride, hi + 2, wi + 2, 1 - pad, out_channels or wt.N))
+
+
+def pad_half(gpu: Gpu, x: Tensor, xp: Tensor, *, H: int, W: int, C: int, up: int = 1, batch: int = 1,
+             reflect: bool = False):
+    """xp = the padded half images of x [batch][H/up][W/up][C] (float or half) upsampled up times by nearest
+    neighbour, bordered with zeros or (reflect) the images' reflection."""
+    k = gpu.kernel("conv.metal", "pad_half", PAD_IN_T=OUT_DT[x.dtype])
+    n = batch * (H + 2) * (W + 2) * (C // 4)
+    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [x, xp], pack("6i", H, W, C, up, batch, int(reflect)))
+
+
+def fill_border(gpu: Gpu, xp: Tensor, *, H: int, W: int, C: int, batch: int = 1, reflect: bool = False):
+    """The one-pixel border of padded images whose inside is written: zeros, or the reflection of the inside."""
+    k = gpu.kernel("conv.metal", "fill_border")
+    n = batch * (2 * (W + 2) + 2 * H) * (C // 4)
+    gpu.launch(k, (-(-n // 256), 1, 1), (256, 1, 1), [xp], pack("6i", H, W, C, 1, batch, int(reflect)))

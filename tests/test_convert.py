@@ -132,13 +132,17 @@ def test_cli_sizes_and_device_check():
     from h3metal.gpu import has_matrix_units
     assert size_for("16:9") == (5472, 3072) and size_for("1:1") == (4096, 4096)  # MiniMax's recommended sizes
     assert _size("2048x1536") == (2048, 1536) and _size("16:9@2k") == size_for("16:9", 2048 * 2048)
-    for bad in ("2000x2000", "100x100", "16:9@8k", "big"):
+    assert _size("2000x1008") == (2000, 1008)  # multiples of 16 pass (Z-Image); MiniMax-H3 checks for 32 later
+    for bad in ("2008x2008", "100x100", "16:9@8k", "big"):
         try:
             _size(bad)
             raise AssertionError(bad)
         except argparse.ArgumentTypeError:
             pass
     assert has_matrix_units("Apple M6") and has_matrix_units("Apple M5 Pro") and not has_matrix_units("Apple M4 Max")
+    from h3metal.cli import DEFAULT_MODEL, ZIMAGE_MODEL, _model_dir
+    assert _model_dir("zimage") == ZIMAGE_MODEL and _model_dir("Z-Image-Turbo") == ZIMAGE_MODEL
+    assert _model_dir("minimax-h3") == DEFAULT_MODEL and _model_dir("/some/dir") == "/some/dir"
     from h3metal.cli import auto_format
     assert [auto_format(g * 2**30) for g in (16, 24, 32, 64)] == ["q4", "mix", "q8", "q8"]
 

@@ -93,21 +93,29 @@ static inline float tg_max(float v, threadgroup float *tmp, ushort sg, ushort la
 #define HDIM 128
 #endif
 
+#ifndef POST
+#define POST 0
+#endif
+
 // a[m] = int8(rot(rmsnorm(x[m]) * scale'[type] + shift[type])), one threadgroup per row.
 // mod: [types][2][D] floats per row type: scale' (the norm weight times 1 + scale) and shift.
 // With OUT_F, writes the modulated row as floats instead (no rotation, no quantization).
-kernel void norm_mod_q8(device const float *x [[buffer(0)]],
+// With POST, first x[m] += post * rmsnorm(y[m]) (written back): the previous product's normalized, gated output
+// joins the residual stream in the same pass (post_norm_add below, fused).
+kernel void norm_mod_q8(device float *x [[buffer(0)]],
                         device const float *mod [[buffer(1)]],
                         device const uchar *rtype [[buffer(2)]],
                         device void *out [[buffer(3)]],
                         device float *sa [[buffer(4)]],
                         constant NormQParams &p [[buffer(5)]],
+                        device const float *y [[buffer(6)]],
+                        device const float *post [[buffer(7)]],
                         uint m [[threadgroup_position_in_grid]],
                         ushort sg [[simdgroup_index_in_threadgroup]],
                         ushort lane [[thread_index_in_simdgroup]])
 {
   threadgroup float tmp[NSG];
-  const device float *row = x + size_t(m) * p.x_stride;
+  device float *row = x + size_t(m) * p.x_stride;
   const int nb = p.D / RB;
 
   float v[MAXB][8];
@@ -120,10 +128,48 @@ kernel void norm_mod_q8(device const float *x [[buffer(0)]],
       const float4 a = src[0], c = src[1];
       v[b][0] = a.x; v[b][1] = a.y; v[b][2] = a.z; v[b][3] = a.w;
       v[b][4] = c.x; v[b][5] = c.y; v[b][6] = c.z; v[b][7] = c.w;
+#if !POST
 #pragma clang loop unroll(full)
       for (int i = 0; i < 8; i++) ss += v[b][i] * v[b][i];
+#endif
     }
   }
+#if POST
+  {
+    float yv[MAXB][8];
+    float ssy = 0;
+#pragma clang loop unroll(full)
+    for (int b = 0; b < MAXB; b++) {
+      const int blk = sg + b * NSG;
+      if (blk < nb) {
+        const device float4 *src = (const device float4 *)(y + size_t(m) * p.D + blk * RB + lane * 8);
+        const float4 a = src[0], c = src[1];
+        yv[b][0] = a.x; yv[b][1] = a.y; yv[b][2] = a.z; yv[b][3] = a.w;
+        yv[b][4] = c.x; yv[b][5] = c.y; yv[b][6] = c.z; yv[b][7] = c.w;
+#pragma clang loop unroll(full)
+        for (int i = 0; i < 8; i++) ssy += yv[b][i] * yv[b][i];
+      }
+    }
+    const float iy = rsqrt(tg_sum<NSG>(ssy, tmp, sg, lane) / float(p.D) + p.eps);
+#pragma clang loop unroll(full)
+    for (int b = 0; b < MAXB; b++) {
+      const int blk = sg + b * NSG;
+      if (blk < nb) {
+        const device float4 *w = (const device float4 *)(post + blk * RB + lane * 8);
+        const float4 w0 = w[0], w1 = w[1];
+        const float pw[8] = {w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w};
+#pragma clang loop unroll(full)
+        for (int i = 0; i < 8; i++) {
+          v[b][i] += pw[i] * yv[b][i] * iy;
+          ss += v[b][i] * v[b][i];
+        }
+        device float4 *dst = (device float4 *)(row + blk * RB + lane * 8);
+        dst[0] = float4(v[b][0], v[b][1], v[b][2], v[b][3]);
+        dst[1] = float4(v[b][4], v[b][5], v[b][6], v[b][7]);
+      }
+    }
+  }
+#endif
   const float inv = rsqrt(tg_sum<NSG>(ss, tmp, sg, lane) / float(p.D) + p.eps);
   const device float *md = mod + size_t(rtype[m]) * p.mod_stride;
 
@@ -416,10 +462,14 @@ kernel void copy4(device const float4 *src [[buffer(0)]],
 // LayerNorm with affine weight and bias over D channels -> half; one threadgroup per row.
 struct LnParams { int M, D, x_stride; float eps; };
 
+#ifndef LN_OUT_T
+#define LN_OUT_T half
+#endif
+
 kernel void layer_norm(device const float *x [[buffer(0)]],
                        device const float *w [[buffer(1)]],
                        device const float *b [[buffer(2)]],
-                       device half *out [[buffer(3)]],
+                       device LN_OUT_T *out [[buffer(3)]],
                        constant LnParams &p [[buffer(4)]],
                        uint m [[threadgroup_position_in_grid]],
                        ushort sg [[simdgroup_index_in_threadgroup]],
@@ -434,8 +484,8 @@ kernel void layer_norm(device const float *x [[buffer(0)]],
   float v = 0;
   for (int c = tid; c < p.D; c += NSG * 32) { const float d = row[c] - mean; v += d * d; }
   const float inv = rsqrt(tg_sum<NSG>(v, tmp, sg, lane) / float(p.D) + p.eps);
-  device half *o = out + size_t(m) * p.D;
-  for (int c = tid; c < p.D; c += NSG * 32) o[c] = half((row[c] - mean) * inv * w[c] + b[c]);
+  device LN_OUT_T *o = out + size_t(m) * p.D;
+  for (int c = tid; c < p.D; c += NSG * 32) o[c] = LN_OUT_T((row[c] - mean) * inv * w[c] + b[c]);
 }
 
 // out[m][j] = value * silu(gate), in[m] = [values (F) | gates (F)], half -> half.
@@ -453,13 +503,18 @@ kernel void swiglu(device const half *in [[buffer(0)]],
   out[size_t(m) * p.F + j] = half(float(row[j]) * g / (1.0f + exp(-g)));
 }
 
-// ---- Convolutions as matrix products (the VAE encoder) ----------------------
+// ---- Convolutions as matrix products (first layers with few channels) ------
 // Activations are NHWC. im2col writes, for every output pixel of a 3x3 (or
 // 1x1) convolution, the KH*KW*C input values it reads, in (ky, kx, c) order,
 // padded with zeros to K columns. Out-of-image taps read the reflection of
-// the image (no edge repeat); pad_t/pad_l give the padding before the first
-// row/column, the bottom/right side is whatever the stride leaves.
-struct Im2colParams { int N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K; };
+// the image (no edge repeat), or zeros with ZPAD; pad_t/pad_l give the
+// padding before the first row/column, the bottom/right side is whatever the
+// stride leaves. Output rows start at row0 (a stripe of Ho rows). Wider
+// convolutions run without im2col (kernels/conv.metal).
+#ifndef ZPAD
+#define ZPAD 0
+#endif
+struct Im2colParams { int N, H, W, C, Ho, Wo, KH, KW, stride, pad_t, pad_l, K, row0; };
 
 static inline int reflect(int i, int n) {
   if (i < 0) i = -i;
@@ -479,11 +534,20 @@ kernel void im2col(device const half *x [[buffer(0)]],
   const int pix = int(gid) / (C4 * taps);
   if (pix >= p.N * p.Ho * p.Wo) return;
   const int n = pix / (p.Ho * p.Wo), r = pix % (p.Ho * p.Wo);
-  const int oy = r / p.Wo, ox = r % p.Wo;
+  const int oy = r / p.Wo + p.row0, ox = r % p.Wo;
   const int ky = tap / p.KW, kx = tap % p.KW;
-  const int iy = reflect(oy * p.stride + ky - p.pad_t, p.H), ix = reflect(ox * p.stride + kx - p.pad_l, p.W);
-  const device half *src = x + ((size_t(n) * p.H + iy) * p.W + ix) * p.C + c4;
+  int iy = oy * p.stride + ky - p.pad_t, ix = ox * p.stride + kx - p.pad_l;
   device half *dst = col + size_t(pix) * p.K + tap * p.C + c4;
+#if ZPAD
+  if (iy < 0 || iy >= p.H || ix < 0 || ix >= p.W) {
+    for (int i = 0; i < 4 && c4 + i < p.C; i++) dst[i] = 0;
+    return;
+  }
+#else
+  iy = reflect(iy, p.H);
+  ix = reflect(ix, p.W);
+#endif
+  const device half *src = x + ((size_t(n) * p.H + iy) * p.W + ix) * p.C + c4;
   if ((p.C & 3) == 0) {
     *(device half4 *)dst = *(const device half4 *)src;
   } else {
@@ -492,36 +556,66 @@ kernel void im2col(device const half *x [[buffer(0)]],
 }
 
 // GroupNorm statistics per image and group, in two passes: pass 0 sums the values, pass 1 the squared
-// deviations from the mean pass 0 found. stats[n][g] = (sum, sum of squared deviations).
-struct GnParams { int N, HW, C, G; float eps; int silu; int pass; };
+// deviations from the mean pass 0 found; stats[n][g] = (sum, sum of squared deviations). No atomics, so equal
+// inputs give equal statistics bit for bit (float addition is not associative: atomics that land in a varying
+// order made the same image normalize slightly differently from run to run). Each pass is gn_stats, one
+// threadgroup of 256 threads per run of GN_CHUNK pixels of one image writing that run's per-group sums to
+// part[n][chunk][g], then gn_reduce, one thread per image and group adding the runs in order.
+struct GnParams { int N, HW, C, G; float eps; int silu; int pass; int W; int chunks; };
+#ifndef GN_IN_T
+#define GN_IN_T float  // the input's precision (statistics and normalization always in float)
+#endif
+#ifndef PADW
+#define PADW 0  // gn_apply: write the inside of images with a one-pixel border (the input of a conv3x3)
+#endif
+#define GN_CHUNK 2048
 
-kernel void gn_stats(device const float *x [[buffer(0)]],
-                     device atomic_float *stats [[buffer(1)]],
-                     constant GnParams &p [[buffer(2)]],
-                     uint3 gid [[thread_position_in_grid]])
+kernel void gn_stats(device const GN_IN_T *x [[buffer(0)]],
+                     device float *part [[buffer(1)]],
+                     device const float *stats [[buffer(2)]],
+                     constant GnParams &p [[buffer(3)]],
+                     uint2 tg [[threadgroup_position_in_grid]],
+                     ushort tid [[thread_index_in_threadgroup]])
 {
-  // thread: (channel group, image, a run of 64 pixels)
-  const int g = int(gid.x), n = int(gid.y), p0 = int(gid.z) * 64;
-  if (g >= p.G || n >= p.N || p0 >= p.HW) return;
-  const int cg = p.C / p.G;
-  float mean = 0;
-  if (p.pass == 1) {
-    device const float *st = (device const float *)stats;
-    mean = st[(n * p.G + g) * 2] / float(p.HW * cg);
-  }
+  // Thread t reads channels 4 (t % C4) .. +3 of every (256 / C4)-th pixel of the run, so a SIMD-group reads
+  // whole rows (coalesced); the four channels of a float4 always share a group (groups hold multiples of four).
+  threadgroup float tmp[256];
+  const int n = int(tg.y), chunk = int(tg.x), px0 = chunk * GN_CHUNK;
+  const int C4 = p.C / 4, cg = p.C / p.G;
+  const int q = tid % C4, g = q * 4 / cg;
+  const float mean = p.pass == 1 ? stats[(n * p.G + g) * 2] / float(p.HW * cg) : 0.0f;
+  const device vec<GN_IN_T, 4> *x4 = (const device vec<GN_IN_T, 4> *)x + size_t(n) * p.HW * C4;
   float s = 0;
-  for (int px = p0; px < min(p0 + 64, p.HW); px++) {
-    const device float *row = x + (size_t(n) * p.HW + px) * p.C + g * cg;
-    for (int c = 0; c < cg; c++) {
-      const float v = row[c] - mean;
-      s += p.pass == 1 ? v * v : v;
-    }
+  const int end = min(px0 + GN_CHUNK, p.HW);
+  for (int px = px0 + tid / C4; px < end; px += 256 / C4) {
+    const float4 v = float4(x4[size_t(px) * C4 + q]) - mean;
+    s += p.pass == 1 ? dot(v, v) : (v.x + v.y) + (v.z + v.w);
   }
-  atomic_fetch_add_explicit(&stats[(n * p.G + g) * 2 + p.pass], s, memory_order_relaxed);
+  tmp[tid] = s;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tid < p.G) {  // group tid: channel quads tid * cg/4 .. +cg/4 of every pixel lane, in a fixed order
+    const int q0 = int(tid) * cg / 4, nq = cg / 4, lanes = 256 / C4;
+    float t = 0;
+    for (int r = 0; r < lanes; r++)
+      for (int k = 0; k < nq; k++) t += tmp[r * C4 + q0 + k];
+    part[(size_t(n) * p.chunks + chunk) * p.G + tid] = t;
+  }
 }
 
-// y = (x - mean) / std * w + b, optionally SiLU, float in -> half out.
-kernel void gn_apply(device const float *x [[buffer(0)]],
+kernel void gn_reduce(device const float *part [[buffer(0)]],
+                      device float *stats [[buffer(1)]],
+                      constant GnParams &p [[buffer(2)]],
+                      uint gid [[thread_position_in_grid]])
+{
+  const int n = int(gid) / p.G, g = int(gid) % p.G;
+  if (n >= p.N) return;
+  float t = 0;
+  for (int c = 0; c < p.chunks; c++) t += part[(size_t(n) * p.chunks + c) * p.G + g];
+  stats[(n * p.G + g) * 2 + p.pass] = t;
+}
+
+// y = (x - mean) / std * w + b, optionally SiLU, float or half in -> half out.
+kernel void gn_apply(device const GN_IN_T *x [[buffer(0)]],
                      device const float *sums [[buffer(1)]],
                      device const float *w [[buffer(2)]],
                      device const float *b [[buffer(3)]],
@@ -535,9 +629,14 @@ kernel void gn_apply(device const float *x [[buffer(0)]],
   const float cnt = float(p.HW * (p.C / p.G));
   const float mean = sums[(n * p.G + g) * 2] / cnt;
   const float var = sums[(n * p.G + g) * 2 + 1] / cnt;
-  float v = (x[size_t(pix) * p.C + c] - mean) * rsqrt(var + p.eps) * w[c] + b[c];
+  float v = (float(x[size_t(pix) * p.C + c]) - mean) * rsqrt(var + p.eps) * w[c] + b[c];
   if (p.silu) v = v / (1.0f + exp(-v));
+#if PADW
+  const int H = p.HW / p.W, r = pix % p.HW, yy = r / p.W, xx = r % p.W;
+  y[((size_t(n) * (H + 2) + yy + 1) * (p.W + 2) + xx + 1) * p.C + c] = half(v);
+#else
   y[size_t(pix) * p.C + c] = half(v);
+#endif
 }
 
 // y = half(x), n elements.
@@ -599,4 +698,74 @@ kernel void gelu(device const float *x [[buffer(0)]],
   const float g = p.exact ? 0.5f * v * (1.0f + erf_approx(v * 0.70710678f))
                           : 0.5f * v * (1.0f + precise::tanh(0.7978845608f * (v + 0.044715f * v * v * v)));
   y[i] = half(g);
+}
+
+// x[m] += post * rmsnorm(y[m]): a product's output normalized (RMS over the row), scaled per channel and
+// added to the residual stream (Z-Image normalizes every block's attention and MLP output this way, with
+// post = the norm weight times the step's tanh gate). One threadgroup per row; post: [D] floats.
+kernel void post_norm_add(device float *x [[buffer(0)]],
+                          device const float *y [[buffer(1)]],
+                          device const float *post [[buffer(2)]],
+                          constant NormQParams &p [[buffer(3)]],
+                          uint m [[threadgroup_position_in_grid]],
+                          ushort sg [[simdgroup_index_in_threadgroup]],
+                          ushort lane [[thread_index_in_simdgroup]])
+{
+  threadgroup float tmp[NSG];
+  const device float *row = y + size_t(m) * p.D;
+  device float *xr = x + size_t(m) * p.x_stride;
+  const int nb = p.D / RB;
+  float4 v[MAXB][2];
+  float ss = 0;
+#pragma clang loop unroll(full)
+  for (int b = 0; b < MAXB; b++) {
+    const int blk = sg + b * NSG;
+    if (blk < nb) {
+      const device float4 *src = (const device float4 *)(row + blk * RB + lane * 8);
+      v[b][0] = src[0];
+      v[b][1] = src[1];
+      ss += dot(v[b][0], v[b][0]) + dot(v[b][1], v[b][1]);
+    }
+  }
+  const float inv = rsqrt(tg_sum<NSG>(ss, tmp, sg, lane) / float(p.D) + p.eps);
+#pragma clang loop unroll(full)
+  for (int b = 0; b < MAXB; b++) {
+    const int blk = sg + b * NSG;
+    if (blk < nb) {
+      const int c = blk * RB + lane * 8;
+      device float4 *dst = (device float4 *)(xr + c);
+      const device float4 *w = (const device float4 *)(post + c);
+      dst[0] += w[0] * v[b][0] * inv;
+      dst[1] += w[1] * v[b][1] * inv;
+    }
+  }
+}
+
+// p[m] = half(softmax(scale * s[m][0 .. valid))), zeros from valid to L. One threadgroup per row (the FLUX
+// decoder's single-head attention, its scores materialized a chunk of query rows at a time).
+struct SoftmaxParams { int M, L, valid; float scale; };
+
+kernel void softmax_rows(device const float *s [[buffer(0)]],
+                         device half *out [[buffer(1)]],
+                         constant SoftmaxParams &p [[buffer(2)]],
+                         uint m [[threadgroup_position_in_grid]],
+                         ushort tid [[thread_index_in_threadgroup]],
+                         ushort sg [[simdgroup_index_in_threadgroup]],
+                         ushort lane [[thread_index_in_simdgroup]])
+{
+  threadgroup float tmp[NSG];
+  const device float *row = s + size_t(m) * p.L;
+  device half *o = out + size_t(m) * p.L;
+  float mx = -INFINITY;
+  for (int c = tid; c < p.valid; c += NSG * 32) mx = max(mx, row[c] * p.scale);
+  mx = simd_max(mx);
+  if (lane == 0) tmp[sg] = mx;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  mx = tmp[0];
+  for (int i = 1; i < NSG; i++) mx = max(mx, tmp[i]);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float sum = 0;
+  for (int c = tid; c < p.valid; c += NSG * 32) sum += exp(row[c] * p.scale - mx);
+  const float inv = 1.0f / tg_sum<NSG>(sum, tmp, sg, lane);
+  for (int c = tid; c < p.L; c += NSG * 32) o[c] = c < p.valid ? half(exp(row[c] * p.scale - mx) * inv) : half(0);
 }

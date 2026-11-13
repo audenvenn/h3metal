@@ -77,6 +77,42 @@ left), the differences coming from their different quantizations:
 
 ![The same prompt and seed, h3metal and h3-image-mlx](images/same_seed.jpg)
 
+## Z-Image-Turbo, against mflux
+
+[mflux](https://github.com/filipstrand/mflux) 0.24.0 (MLX 0.32.4) with its own 8-bit copy of the
+released model, saved once with `mflux-save --model <checkpoint> --base-model z-image-turbo --quantize 8`, so
+that neither implementation quantizes at startup (h3metal runs the int8 files `h3metal convert` wrote).
+Both run eight transformer passes (`--steps 8`). Same method as above (`bench/speed.py`: fresh processes,
+alternating, 60 s pauses, the h3metal command `h3metal generate --model zimage`), prompt "A red fox sitting
+in fresh snow at sunrise, photorealistic, soft golden light.", seed 42:
+
+| Size | h3metal | mflux | Speed-up |
+|---|---:|---:|---:|
+| 1024 x 1024, prompt seen before (2 runs after a warm-up) | 16.2 s (16.5, 15.8) | 36.9 s (37.0, 36.7) | 2.3x |
+| 1024 x 1024, new prompt every run (2 runs) | 17.4 s (17.3, 17.4) | 36.9 s (37.0, 36.8) | 2.1x |
+| 2048 x 2048 (1 run) | 97.1 s | 217.4 s | 2.2x |
+
+mflux encodes every prompt anew (it pads it to 512 tokens), so the new-prompt row compares like with like.
+The 2048 x 2048 h3metal run reused the cached prompt, which saves it about a second.
+
+The two draw different pictures for the same seed: mflux draws its noise with MLX's generator and shifts the
+schedule by the image's size (mu 1.15 at 1024 x 1024), where diffusers and h3metal draw torch's noise and shift
+by 3.
+
+Memory does not compare like for like from the process footprints (h3metal 2.2 GB at 1024 x 1024 and 7.8 GB
+at 2048 x 2048; mflux 10.4 and 15.5 GB). h3metal maps its weight files, which macOS keeps in its file cache
+and a footprint does not count, while mflux reads its 10 GB of weights into its own memory. Counting the
+6.1 GB transformer file that must stay resident while it denoises, h3metal needs about 8.4 GB at 1024 x 1024
+against mflux's 10.4 GB. The resident set size does not help either: macOS leaves the GPU's buffers out of
+it (h3metal 0.6 GB, mflux 5.3 GB). Run as its README shows, without quantization, mflux reads the released
+float32 transformer into bfloat16 (about 20 GB with the text encoder). On this 24 GB Mac it filled 11 GB of
+swap and was stopped.
+
+Commands: `bench/speed.py --sizes 1024 --runs 2 --warmup`, then `--sizes 1024 --runs 2 --cold` and
+`--sizes 2048 --runs 1`, each with `--h3metal "h3metal generate --model zimage"` and `--other
+"mflux-generate-z-image-turbo --model <the 8-bit copy> --base-model z-image-turbo --steps 8"`; the single runs
+are in the table.
+
 ## Kernels
 
 `bench/hw/mma_rate.py` measures the matrix units on register fragments,

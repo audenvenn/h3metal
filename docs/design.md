@@ -216,10 +216,14 @@ The decoder is a 24-layer ViT applied to overlapping 256-pixel tiles: all
 tiles of a size run as one batch, through the same matrix-product and
 attention kernels as the transformer (a batch of short sequences in one
 dispatch), and are blended exactly as the reference blends them. The
-encoder, needed for the reference images of an edit, is a CNN: every
-convolution runs as an im2col pass and a half-precision product on the
-matrix units, with GroupNorm and SiLU fused into one pass. A 2048 x 2048
-reference encodes in about 4 seconds.
+encoder, needed for the reference images of an edit, is a CNN. Its 3x3
+convolutions run as nine accumulating half-precision products per output
+tile whose left operands are views into the input, stored with a one-pixel
+border filled by reflection (kernels/conv.metal; a stride-2 convolution
+reads every other pixel and uses only the bottom and right border, as the
+reference pads it); GroupNorm and SiLU write straight into that layout. A
+2048 x 2048 reference encodes in 3.1 s (3.8 s with im2col, which only the
+three-channel first convolution still uses).
 
 ## Edits
 

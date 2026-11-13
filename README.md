@@ -18,6 +18,11 @@ The transformer, where nearly all of that time goes, runs at about 80% of
 what the GPU's matrix units can do at their measured peak. See
 [Performance](#performance) and [Image quality](#image-quality).
 
+h3metal also runs [Z-Image-Turbo](#z-image-turbo) (Tongyi-MAI, Apache-2.0)
+on the same engine: a 1024 x 1024 image in 17 s from a new prompt, 2.1
+times faster than [mflux](https://github.com/filipstrand/mflux), and nearly
+the same picture as the official pipeline.
+
 ## Quick start
 
 Needs a Mac with Apple silicon and Metal 4 (macOS 26 or later), Python 3.10+
@@ -37,7 +42,7 @@ h3metal generate -p "Put <Picture 1> on a beach at dusk" -i photo.jpg -o edit.pn
 ```
 
 The model comes with its own license, which limits where and how it may be
-used: read [The model's license](#the-models-license) before downloading.
+used: read [The models' licenses](#the-models-licenses) before downloading.
 `h3metal download --source modelscope` fetches from ModelScope instead of
 Hugging Face. Converting reads the checkpoint once; afterwards
 `~/.h3metal/model` holds everything h3metal runs, 40-50 GB depending on the
@@ -63,7 +68,8 @@ h3metal generate -p PROMPT [-s SIZE] [--seed N] [-n COUNT] [-o OUT.png] [-i REF.
   `<Picture 1>`, `<Picture 2>`, ... in the prompt. References can be PNG, JPEG,
   WebP or anything else macOS opens, HEIC photos included.
 - PNG output carries the prompt, seed and size, and says that the image is
-  AI-generated, as the model's license asks.
+  AI-generated (MiniMax-H3-Image's license asks for that), and which model
+  made it.
 - The very first run compiles the Metal kernels, which adds a few seconds;
   macOS caches them for later runs.
 
@@ -217,9 +223,44 @@ MLP). With int8 weights throughout, like h3-image-mlx's, it takes 45.0 s at
 grows with the square of the number of rows, takes half of the time at
 4096 x 4096.
 
-## The model's license
+## Z-Image-Turbo
 
-h3metal's code is Apache-2.0. The model is not: MiniMax-H3-Image is licensed
+[Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) is
+Tongyi-MAI's 6 B text-to-image model, distilled to eight steps. h3metal runs
+it on the same engine: its transformer on the int8 products and attention
+above, its Qwen3-4B text encoder on the same code as MiniMax-H3's, and the
+FLUX decoder on convolutions without im2col ([how](docs/zimage.md),
+[and how to add another model](docs/engine.md)).
+
+```sh
+h3metal download --model z-image-turbo     # 33 GB (--source modelscope also works)
+h3metal convert ~/.h3metal/z-image-turbo   # int8, 10.7 GB, into ~/.h3metal/zimage, about 2 minutes
+h3metal generate --model zimage -p "A red fox sitting in fresh snow at sunrise" -o fox.png
+```
+
+Images are 1024 x 1024 by default (`-s` takes other sizes, multiples of 16).
+Against mflux 0.24 on the same Mac mini (M6, 24 GB), with mflux running its
+own 8-bit copy of the model (`mflux-save -q 8`), eight steps, every run a
+fresh process ([method](docs/benchmarks.md#z-image-turbo-against-mflux)):
+
+| Size | h3metal | mflux | Speed-up |
+|---|---:|---:|---:|
+| 1024 x 1024, new prompt every run | 17.4 s | 36.9 s | 2.1x |
+| 1024 x 1024, prompt seen before | 16.2 s | 36.9 s | 2.3x |
+| 2048 x 2048 | 97.1 s | 217.4 s | 2.2x |
+
+mflux has no prompt cache, so the first row is the like-for-like one. One
+transformer block runs at 78-80% of the matrix units' floor. With the same
+prompt and noise as diffusers' `ZImagePipeline` in bfloat16, the image comes
+out within 31.3 dB PSNR (SSIM 0.974) of it; the comparison part by part and
+both pictures are in [docs/zimage.md](docs/zimage.md). The same seed gives
+the same image on every run.
+
+## The models' licenses
+
+h3metal's code is Apache-2.0. The models are licensed by their makers.
+
+MiniMax-H3-Image is licensed
 under the [MiniMax-H3-Image Community License Agreement](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE),
 which, among other terms, grants rights only within its Applicable
 Territory (worldwide except the European Union, the United Kingdom, the
@@ -230,10 +271,17 @@ from MiniMax's own repositories) and accept that license by doing so. Files
 that `h3metal convert` writes are derivatives of the model and remain under
 it.
 
+Z-Image-Turbo is licensed by Tongyi-MAI under the
+[Apache License 2.0](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo).
+`h3metal download --model z-image-turbo` fetches it from Tongyi-MAI's own
+repositories.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Measured claims only: a change to
-speed or numerics comes with the numbers and how they were taken.
+speed or numerics comes with the numbers and how they were taken. To bring
+another model to the engine, [docs/engine.md](docs/engine.md) lists its
+parts and the steps Z-Image took.
 
 ## Acknowledgements
 

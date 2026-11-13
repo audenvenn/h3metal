@@ -22,5 +22,12 @@ photorealistic, soft golden light.", seed 42, 2048 x 2048, by h3metal (left)
 and h3-image-mlx 0.1.0a3 (right) during the benchmark in
 docs/benchmarks.md; resized to 640 x 640 each.
 
+`zimage_same_seed.jpg`: AI-generated with Z-Image-Turbo, "A red fox sitting
+in fresh snow at sunrise, photorealistic, soft golden light.", seed 42,
+1024 x 1024, by diffusers' ZImagePipeline in bfloat16 on the Mac's GPU
+(left; tests/ref/zimage_reference.py) and by h3metal with int8 weights
+(right; bench/zimage_quality.py); resized to 800 x 800 each.
+
 MiniMax-H3-Image is licensed under the MiniMax-H3-Image Community License
-Agreement, Copyright © 2026 MiniMax. All Rights Reserved.
+Agreement, Copyright © 2026 MiniMax. All Rights Reserved. Z-Image-Turbo is
+licensed under the Apache License, Version 2.0 (Tongyi-MAI).
