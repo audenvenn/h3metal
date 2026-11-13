@@ -4,7 +4,8 @@ block, the embeddings and the output layer with pDMD's LoRA merged, against floa
 
     python tests/test_minimax_truncated.py SRC LORA REF_DIR
 
-SRC is the original checkpoint, LORA pDMD's file, REF_DIR what the reference side wrote.
+SRC is the original checkpoint, LORA pDMD's file ("none": the base weights, to calibrate), REF_DIR what the
+reference side wrote.
 """
 import os
 import sys
@@ -32,7 +33,8 @@ with tempfile.TemporaryDirectory() as d:
     for name, fmts in (("int8", "q8,q8,q8,q8"), ("int8 attention, int4 MLP", "q8,q8,q4,q4")):
         path = os.path.join(d, "dit.h3m")
         convert_dit(src, path, fmts=dict(zip(("qkv", "out", "fc1", "fc2"), fmts.split(","))), layers=1,
-                    flow={"shift": 12.0, "steps": [2]}, lora=[(lora, 1.0)], log=lambda *a: None)
+                    flow={"shift": 12.0, "steps": [2]}, lora=None if lora == "none" else [(lora, 1.0)],
+                    log=lambda *a: None)
         wf = WeightFile(gpu, path)
         dit = DiT(gpu, wf)
         sigmas, first = dit.schedules[2]

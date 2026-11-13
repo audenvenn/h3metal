@@ -5,7 +5,7 @@ the CPU by diffusers' MiniMax-H3 transformer, at the timesteps of the 2-step gri
     python tests/ref/minimax_truncated.py SRC LORA OUT_DIR CAPTION.npy
 
 SRC is the original checkpoint (only the first transformer shard is read: it holds all of the above). LORA is
-pDMD's file, as released (diffusers' module names). CAPTION.npy holds real caption features [T][5120] (h3metal's
+pDMD's file, as released (diffusers' module names), or "none" for the base weights (the calibration run). CAPTION.npy holds real caption features [T][5120] (h3metal's
 text encoder on a prompt). diffusers' scripts/convert_minimax_h3_to_diffusers.py does the key conversion; its
 directory comes from DIFFUSERS_SCRIPTS (default ~/project/h3-ref/diffusers-src). OUT_DIR receives ref.npz: the
 latents (one 1024 x 1024 image), the caption features, the grid and both steps' velocities.
@@ -43,7 +43,8 @@ model = MiniMaxH3Transformer3DModel(**cfg).float().eval()
 
 # 1. The checkpoint's tensors for that model, converted by diffusers' own script.
 index = json.load(open(os.path.join(src, "transformer", "model.safetensors.index.json")))["weight_map"]
-wanted = [k for k in index if not k.startswith("blocks.") or k.startswith("blocks.0.")]
+wanted = [k for k in index if k not in conv.MINIMAX_H3_TRANSFORMER_DROPPED_KEYS
+          and (not k.startswith("blocks.") or k.startswith("blocks.0."))]
 sd = {}
 for shard in sorted({index[k] for k in wanted}):
     with safe_open(os.path.join(src, "transformer", shard), framework="pt") as f:
@@ -59,7 +60,7 @@ missing, unexpected = model.load_state_dict(sd, strict=False)
 assert not unexpected and all(k.startswith("audio_") for k in missing), (unexpected, missing)
 
 # 2. pDMD's LoRA merged in float32, as its card does it (W += B @ A, scale 1), on the modules this model has.
-lora = load_file(lora_path)
+lora = load_file(lora_path) if lora_path != "none" else {}
 params = dict(model.named_parameters())
 merged = 0
 with torch.no_grad():
@@ -70,8 +71,8 @@ with torch.no_grad():
         if name in params:
             params[name].add_(lora[k.replace(".lora_A.", ".lora_B.")].float() @ a.float())
             merged += 1
-print(f"merged {merged} LoRA pairs (the refiner's and block 0's)")
-assert merged == 12, merged
+print(f"merged {merged} LoRA pairs (six per block: the refiner's two and block 0)")
+assert merged == (6 * (cfg["num_refiner_layers"] + 1) if lora else 0), merged
 
 # 3. One 1024 x 1024 image (64 x 64 latents), packed by the video pipeline as one frame; the 2-step grid.
 txt = torch.from_numpy(np.load(cap).astype(np.float32)).to(torch.bfloat16).float()[None]
