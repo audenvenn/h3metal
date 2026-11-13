@@ -316,6 +316,46 @@ def test_streamed_conversion_is_the_same():
         assert not [f for f in os.listdir(os.path.join(dest, "transformer")) if f.endswith(".safetensors")]
 
 
+def test_two_transformers_in_one_pass():
+    """convert_dits writes the six-step file and the few-step one (a LoRA merged, the flow grids) in one pass over
+    streamed shards, each byte for byte what convert_dit writes alone, still with three shards on disk at most."""
+    import hashlib
+    import shutil
+    from h3metal import st
+    from h3metal.convert import convert_dit, convert_dits
+    from h3metal.stream import ShardStream, StreamedSharded
+    fmts = {"qkv": "q8", "out": "q8", "fc1": "q4", "fc2": "q4"}
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dest:
+        names = _mini_minimax_checkpoint(src)
+        rng = np.random.default_rng(2)
+        lora = {}
+        for m, (o, i) in {"transformer_blocks.1.attn.to_k": (256, 256), "transformer_blocks.2.ff.net.0.proj": (1024, 256),
+                          "token_refiner.refiner_blocks.0.attn.to_out.0": (256, 256)}.items():
+            lora[f"transformer.{m}.lora_A.weight"] = rng.standard_normal((4, i)).astype(np.float32) * 0.05
+            lora[f"transformer.{m}.lora_B.weight"] = rng.standard_normal((o, 4)).astype(np.float32) * 0.05
+        lpath = os.path.join(src, "lora.safetensors")
+        st.save(lpath, lora)
+        few = dict(fmts=fmts, flow={"shift": 12.0, "steps": [2, 3]}, lora=[(lpath, 1.0)])
+        convert_dit(src, os.path.join(src, "six.h3m"), fmts=fmts, log=lambda *a: None)
+        convert_dit(src, os.path.join(src, "few.h3m"), log=lambda *a: None, **few)
+        os.makedirs(os.path.join(dest, "transformer"))
+        for f in ("transformer/config.json", "transformer/model.safetensors.index.json", "pdd_config.json",
+                  "pdd_fused_heads.safetensors"):
+            shutil.copy(os.path.join(src, f), os.path.join(dest, f))
+        files = [(f"transformer/{fn}", os.path.getsize(os.path.join(src, "transformer", fn)),
+                  hashlib.sha256(open(os.path.join(src, "transformer", fn), "rb").read()).hexdigest(),
+                  "file://" + os.path.join(src, "transformer", fn)) for fn in names]
+        stream = ShardStream(files, dest, ahead=1, log=lambda *a: None)
+        shards = StreamedSharded(os.path.join(dest, "transformer"), stream, "transformer/")
+        convert_dits(dest, [dict(out=os.path.join(dest, "six.h3m"), fmts=fmts),
+                            dict(out=os.path.join(dest, "few.h3m"), **few)], shards=shards, log=lambda *a: None)
+        shards.close()
+        stream.close()
+        for f in ("six.h3m", "few.h3m"):
+            assert open(os.path.join(src, f), "rb").read() == open(os.path.join(dest, f), "rb").read(), f
+        assert stream.peak_files <= 3, stream.peak_files
+
+
 def test_dit_files():
     """Which transformer file runs how many steps: the six-step one by default, the few-step one for 2-4."""
     from h3metal.pipeline import dit_files

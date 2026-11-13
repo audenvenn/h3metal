@@ -158,6 +158,29 @@ def _signs(seed: int, layer: int, role: int, n: int) -> np.ndarray:
 
 def convert_dit(src: str, out, *, fmts=None, refiner_fmt: str = "q8", seed: int = 1, layers: int | None = None,
                 log=print, flow: dict | None = None, lora=None, shards=None):
+    """See _dit_steps (this runs it to the end)."""
+    for _ in _dit_steps(src, out, fmts=fmts, refiner_fmt=refiner_fmt, seed=seed, layers=layers, log=log, flow=flow,
+                        lora=lora, shards=shards):
+        pass
+
+
+def convert_dits(src: str, targets: list, *, shards=None, log=print):
+    """Several transformer files in one pass over the checkpoint, e.g. the six-step model and the few-step one
+    (pDMD merged) while the shards stream in: targets are convert_dit's keyword arguments each (out, fmts, flow,
+    lora, ...). Their conversions advance block by block in turn, so they read the shards in the same order as one
+    does, and each file is the one convert_dit writes alone."""
+    raw = shards or Sharded(os.path.join(src, "transformer"))
+    steps = [_dit_steps(src, log=log, shards=raw, **t) for t in targets]
+    while steps:
+        for g in list(steps):
+            try:
+                next(g)
+            except StopIteration:
+                steps.remove(g)
+
+
+def _dit_steps(src: str, out, *, fmts=None, refiner_fmt: str = "q8", seed: int = 1, layers: int | None = None,
+               log=print, flow: dict | None = None, lora=None, shards=None):
     """src: the MiniMax-H3-Image directory (transformer/, pdd_*). fmts: format per matrix kind.
     out may also be a dict {path: fmts} to write several formats in one pass over the checkpoint.
 
@@ -258,6 +281,7 @@ def convert_dit(src: str, out, *, fmts=None, refiner_fmt: str = "q8", seed: int 
             final[s, ty, 0] = nw * (1.0 + scale[ti])
             final[s, ty, 1] = shift[ti]
     w.tensor("final_mod", final, "f32")
+    yield  # (convert_dits turns to the next file here, and after every block)
 
     def put(name: str, kind: str, mat: np.ndarray, refiner: bool):
         cache = {}
@@ -299,6 +323,7 @@ def convert_dit(src: str, out, *, fmts=None, refiner_fmt: str = "q8", seed: int 
         m2 = np.stack([st.get(f"{prefix}.norm2.weight") * s_mlp, np.zeros(D, np.float32)])[None]
         w.tensor(f"refiner.{i}.mod1", m1.astype(np.float32), "f32")
         w.tensor(f"refiner.{i}.mod2", m2.astype(np.float32), "f32")
+        yield
     w.tensor("refiner.final_norm", st.get("token_refiner.final_norm.weight").astype(np.float32), "f32")
     w.tensor("ones", np.ones((1, D), np.float32), "f32")
 
@@ -325,6 +350,7 @@ def convert_dit(src: str, out, *, fmts=None, refiner_fmt: str = "q8", seed: int 
                 gate_attn[s, l, ty] = g_msa
                 gate_mlp[s, l, ty] = g_mlp
         log(f"  block {l + 1}/{n_layers} done ({time.time() - t_start:.0f} s)")
+        yield
     w.tensor("mod_attn", mod_attn, "f32")
     w.tensor("mod_mlp", mod_mlp, "f32")
     w.tensor("gate_attn", gate_attn, "f32")

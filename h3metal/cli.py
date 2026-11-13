@@ -278,6 +278,8 @@ def cmd_download(a):
         path = download_lora(a.lora, a.source)
         print(f"next: h3metal generate ... --lora {os.path.splitext(os.path.basename(path))[0]}")
         return
+    if a.pdmd and not a.convert:
+        raise ValueError("--pdmd goes with --convert here; for a checkpoint on disk, `h3metal convert <dir> --pdmd`")
     if a.convert:
         if a.model != "minimax-h3":
             raise ValueError("--convert streams MiniMax-H3-Image's checkpoint; the other models download ready to "
@@ -319,8 +321,8 @@ def download_and_convert(a):
     (~44 GB) and about 17 GB of shards in flight, not the ~125 GB checkpoint as well. A part already converted is
     skipped, so running the command again resumes."""
     import shutil
-    from .convert import convert_dit
-    from .download import _fetch_all, minimax_plan
+    from .convert import convert_dits
+    from .download import PDMD, _fetch_all, minimax_plan, pdmd_lora
     from .stream import ShardStream, StreamedSharded
     from .te import convert_te, convert_vision
     from .vae import convert_vae
@@ -346,20 +348,26 @@ def download_and_convert(a):
         finally:
             shards.close()
             stream.close()
+    fmt = FORMAT_ALIASES.get(auto_format(), auto_format())
+    fmts = dict(zip(("qkv", "out", "fc1", "fc2"), fmt.split(","))) if "," in fmt else \
+        {k: fmt for k in ("qkv", "out", "fc1", "fc2")}
+    targets = []  # the six-step file and, with --pdmd, the few-step one, in one pass over the shards
     if not os.path.exists(os.path.join(out, "dit.h3m")):
-        fmt = FORMAT_ALIASES.get(auto_format(), auto_format())
+        targets.append(dict(out=os.path.join(out, "dit.h3m"), fmts=fmts))
+    if a.pdmd and not os.path.exists(os.path.join(out, "dit-pdmd.h3m")):
+        targets.append(dict(out=os.path.join(out, "dit-pdmd.h3m"), fmts=fmts, lora=[(pdmd_lora(), 1.0)],
+                            flow={"shift": PDMD["shift"], "steps": PDMD["steps"]}))
+    if targets:
         print(f"transformer format for this Mac: {fmt}")
-        fmts = dict(zip(("qkv", "out", "fc1", "fc2"), fmt.split(","))) if "," in fmt else \
-            {k: fmt for k in ("qkv", "out", "fc1", "fc2")}
         stream = ShardStream(dit_shards, ckpt, ahead=1)
         shards = StreamedSharded(os.path.join(ckpt, "transformer"), stream, "transformer/")
         try:
-            convert_dit(ckpt, os.path.join(out, "dit.h3m"), fmts=fmts, shards=shards)
+            convert_dits(ckpt, targets, shards=shards)
         finally:
             shards.close()
             stream.close()
     print(f"converted into {out}; {ckpt} holds only small files now and can be deleted")
-    print("next: h3metal generate -p \"...\"")
+    print("next: h3metal generate -p \"...\"" + (" (or --steps 2)" if a.pdmd else ""))
 
 
 def _check_device(device: str):
@@ -478,6 +486,9 @@ def main(argv=None):
     d.add_argument("--convert", action="store_true",
                    help="MiniMax-H3-Image: convert while downloading, deleting each shard once converted, so the "
                         "disk needs room for the converted model (~44 GB) and ~17 GB more, not the checkpoint too")
+    d.add_argument("--pdmd", action="store_true",
+                   help="with --convert: also the few-step transformer (2, 3 or 4 steps, pDMD's LoRA merged), in the "
+                        "same pass over the shards")
     d.add_argument("--accept-license", action="store_true",
                    help="accept a model's own license where it asks for that (FLUX.2 [klein] 9B: the FLUX "
                         "Non-Commercial License)")
