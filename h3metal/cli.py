@@ -237,6 +237,8 @@ def convert_pdmd(a):
     and vision files are shared; any that are missing are converted too."""
     from .convert import convert_dit
     from .download import PDMD, pdmd_lora
+    if a.gptq:
+        raise ValueError("--gptq calibrates the six-step transformer; it does not apply to --pdmd")
     if a.dit == "auto":
         a.dit = auto_format()
         print(f"transformer format for this Mac: {a.dit} (choose another with --dit)")
