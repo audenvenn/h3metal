@@ -403,6 +403,13 @@ repositories (or ModelScope's copy). Files that `h3metal convert` writes are
 derivatives of the model and remain under its license. h3metal publishes no
 converted copies of it.
 
+## Related
+
+[raceline](https://github.com/audenvenn/raceline) is a sibling project with
+its own Metal engine for the same Macs: a local agent runtime for Qwen3.5 and
+Qwen3.6 models. On a 24 GB Mac it runs up to a 35B mixture of experts,
+streamed from the SSD, with OpenAI- and Anthropic-compatible APIs.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Measured claims only: a change to
