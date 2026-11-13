@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -92,10 +93,22 @@ def pdmd_lora(log=print) -> str:
     return path
 
 
-def _json(url: str):
+def _json(url: str, attempts: int = 5):
+    """A JSON API answer. Connections that fail on the way (resets, TLS errors, timeouts), 429 and 5xx answers are
+    retried with growing pauses; other HTTP errors (401, 404: the repository or revision does not exist) are not."""
     req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if (e.code != 429 and e.code < 500) or i == attempts - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if i == attempts - 1:
+                raise SystemExit(f"cannot reach {url.split('/')[2]}: {getattr(e, 'reason', e)} "
+                                 f"(tried {attempts} times; run the command again to resume)") from e
+        time.sleep(2 ** (i + 1))
 
 
 def list_files(source: str, repo: str | None = None, revision: str = "main"):
@@ -183,7 +196,6 @@ class NotPublished(Exception):
 def download_converted(dest: str, model: str, jobs: int = 4, log=print) -> bool:
     """h3metal's converted weights for model, at the tag this version reads. Raises NotPublished if Hugging Face
     has no such repository or tag; network errors propagate."""
-    import urllib.error
     c = CONVERTED[model]
     try:
         listing = list_files("huggingface", c["repo"], c["revision"])
