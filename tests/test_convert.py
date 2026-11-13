@@ -131,6 +131,35 @@ def test_pdmd_lora_mapping():
             assert "not in MiniMax-H3-Image" in str(e)
 
 
+def test_pdmd_lora_is_pinned():
+    """convert --pdmd takes the local LoRA without the network when its SHA-256 is the pinned one, and fetches it
+    otherwise."""
+    import hashlib
+    from h3metal import download
+    with tempfile.TemporaryDirectory() as d:
+        body = b"not really a LoRA"
+        saved = dict(download.PDMD)
+        calls = []
+        orig = download.download_lora
+        download.PDMD.update(dir=d, file="a.safetensors", size=len(body), sha256=hashlib.sha256(body).hexdigest())
+        download.download_lora = lambda spec, dest, log: calls.append(spec) or os.path.join(dest, "a.safetensors")
+        try:
+            with open(os.path.join(d, "a.safetensors"), "wb") as f:
+                f.write(body)
+            assert download.pdmd_lora(log=lambda *a: None) == os.path.join(d, "a.safetensors") and not calls
+            with open(os.path.join(d, "a.safetensors"), "wb") as f:
+                f.write(b"something else entirely")
+            try:
+                download.pdmd_lora(log=lambda *a: None)
+                raise AssertionError("a different file must be refused")
+            except SystemExit as e:
+                assert "SHA-256" in str(e) and calls, e
+        finally:
+            download.PDMD.clear()
+            download.PDMD.update(saved)
+            download.download_lora = orig
+
+
 def test_dit_files():
     """Which transformer file runs how many steps: the six-step one by default, the few-step one for 2-4."""
     from h3metal.pipeline import dit_files

@@ -236,15 +236,12 @@ def convert_pdmd(a):
     for the plain flow sampler at 2, 3 and 4 steps (shift 12), next to the six-step dit.h3m. The text encoder, VAE
     and vision files are shared; any that are missing are converted too."""
     from .convert import convert_dit
-    from .download import PDMD, download_lora
+    from .download import PDMD, pdmd_lora
     if a.dit == "auto":
         a.dit = auto_format()
         print(f"transformer format for this Mac: {a.dit} (choose another with --dit)")
     a.dit = FORMAT_ALIASES.get(a.dit, a.dit)
-    lora = a.pdmd
-    if lora == "auto":
-        print(f"pDMD's 2-step LoRA ({PDMD['license']}, {PDMD['repo']}):")
-        lora = download_lora(f"{PDMD['repo']}/{PDMD['file']}", dest=PDMD["dir"])
+    lora = pdmd_lora() if a.pdmd == "auto" else a.pdmd
     shared = [p for p, f in (("vae", "vae.h3m"), ("vision", "vision.h3m"), ("te", "te.h3m"),
                              ("tokenizer", "tokenizer.json")) if not os.path.exists(os.path.join(a.out, f))]
     if shared:
