@@ -30,12 +30,13 @@ N_LAYERS = 50  # MiniMax-H3 reads hidden_states[50]
 
 
 def convert_te(src: str, out: str, *, fmt: str = "h8", layers: int = N_LAYERS, seed: int = 2, log=print,
-               prefix: str = "model.language_model"):
-    """src: directory with the Qwen3-VL text encoder (config.json + safetensors shards)."""
+               prefix: str = "model.language_model", shards=None):
+    """src: directory with the Qwen3-VL text encoder (config.json + safetensors shards). shards: its tensors from
+    elsewhere (a stream.StreamedSharded while downloading)."""
     with open(os.path.join(src, "config.json")) as f:
         full = json.load(f)
     tc = full.get("text_config", full)
-    st = Sharded(src)
+    st = shards or Sharded(src)
     D, Hq, Hkv, hd, F = tc["hidden_size"], tc["num_attention_heads"], tc["num_key_value_heads"], tc["head_dim"], \
         tc["intermediate_size"]
     rope = tc.get("rope_scaling") or tc.get("rope_parameters") or {}
@@ -79,11 +80,11 @@ def convert_te(src: str, out: str, *, fmt: str = "h8", layers: int = N_LAYERS, s
     log(f"wrote {out} ({os.path.getsize(out) / 1e9:.2f} GB)")
 
 
-def convert_vision(src: str, out: str, log=print, prefix: str = "model.visual."):
+def convert_vision(src: str, out: str, log=print, prefix: str = "model.visual.", shards=None):
     """The Qwen3-VL vision tower (edits only), stored in float16 under its checkpoint names."""
     with open(os.path.join(src, "config.json")) as f:
         vcfg = json.load(f)["vision_config"]
-    st = Sharded(src)
+    st = shards or Sharded(src)
     w = Writer(out, {"kind": "vision", "config": vcfg})
     for k in sorted(st.keys()):
         if k.startswith(prefix):

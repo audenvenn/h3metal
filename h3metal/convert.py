@@ -157,7 +157,7 @@ def _signs(seed: int, layer: int, role: int, n: int) -> np.ndarray:
 
 
 def convert_dit(src: str, out, *, fmts=None, refiner_fmt: str = "q8", seed: int = 1, layers: int | None = None,
-                log=print, flow: dict | None = None, lora=None):
+                log=print, flow: dict | None = None, lora=None, shards=None):
     """src: the MiniMax-H3-Image directory (transformer/, pdd_*). fmts: format per matrix kind.
     out may also be a dict {path: fmts} to write several formats in one pass over the checkpoint.
 
@@ -165,12 +165,13 @@ def convert_dit(src: str, out, *, fmts=None, refiner_fmt: str = "q8", seed: int 
     six-step grid: the transformer's own output head rather than the six per-step heads, the grids of
     flow_sigmas(n, s) for every n (the first is the default), and the Euler update in its x_t / x0 blend form, as
     diffusers' MiniMaxH3Scheduler runs it. lora: [(path, strength)], merged into the checkpoint's matrices in
-    float32 before they are quantized."""
+    float32 before they are quantized. shards: the transformer's tensors from elsewhere than src/transformer (a
+    stream.StreamedSharded while downloading)."""
     outs = out if isinstance(out, dict) else {out: fmts}
     outs = {p: {"qkv": "q8", "out": "q8", "fc1": "q8", "fc2": "q8", **(f or {})} for p, f in outs.items()}
     with open(os.path.join(src, "transformer", "config.json")) as f:
         cfg = json.load(f)
-    raw = Sharded(os.path.join(src, "transformer"))
+    raw = shards or Sharded(os.path.join(src, "transformer"))
     deltas = lora_deltas(lora, cfg, raw.keys()) if lora else {}
     st = _Merged(raw, deltas)
 

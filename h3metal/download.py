@@ -227,6 +227,30 @@ def download(dest: str, source: str = "huggingface", jobs: int = 4, log=print, m
     return _fetch_all(todo, dest, jobs, log, f"{repo} [{source}]")
 
 
+def minimax_plan(source: str = "huggingface", dest: str | None = None):
+    """MiniMax-H3-Image's checkpoint for converting while downloading: (the small files: configs, tokenizer, the
+    VAE, the per-step heads; the text encoder's shards that h3metal reads, vision tower first, then by layer; the
+    transformer's shards by block). dest receives the text encoder's index, which says what its shards hold."""
+    files = list_files(source)
+    idx_item = [f for f in files if f[0] == "text_encoder/model.safetensors.index.json"]
+    if not idx_item:
+        raise SystemExit("the checkpoint has no text-encoder index")
+    if dest:
+        _fetch(idx_item[0], dest)
+        with open(os.path.join(dest, idx_item[0][0])) as f:
+            index = json.load(f)
+    else:
+        index = None
+    keep = needed(files, index)
+    is_shard = lambda f: fnmatch.fnmatch(f[0], "*/model-*.safetensors")  # noqa: E731
+    small = [f for f in keep if not is_shard(f)]
+    visual = {s for k, s in (index or {}).get("weight_map", {}).items() if "visual" in k}
+    te = sorted((f for f in keep if is_shard(f) and f[0].startswith("text_encoder/")),
+                key=lambda f: (os.path.basename(f[0]) not in visual, f[0]))
+    dit = sorted((f for f in keep if is_shard(f) and f[0].startswith("transformer/")), key=lambda f: f[0])
+    return small, te, dit
+
+
 LORA_DIR = os.path.expanduser("~/.h3metal/loras")
 
 

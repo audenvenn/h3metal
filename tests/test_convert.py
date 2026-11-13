@@ -195,6 +195,127 @@ def test_api_retries():
         download.urllib.request.urlopen, download.time.sleep = orig_open, orig_sleep
 
 
+def test_streamed_shards():
+    """Converting while downloading: shards arrive in read order (file:// URLs through the real downloader), at most
+    three are on disk at once, values are the shards' own, and a read from a deleted shard is refused."""
+    import hashlib
+    import json
+    from h3metal import st
+    from h3metal.stream import ShardStream, StreamedSharded
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dest:
+        os.makedirs(os.path.join(src, "ckpt"))
+        rng = np.random.default_rng(0)
+        want, where, files = {}, {}, []
+        for i in range(5):  # layer i's two tensors; layer 2 straddles shards 1 and 2
+            for part in ("a", "b"):
+                want[f"layers.{i}.{part}"] = rng.standard_normal((64, 32)).astype(np.float32)
+        names = sorted(want, key=lambda k: (int(k.split(".")[1]), k))
+        chunks = [names[:5], names[5:8], names[8:]]
+        for j, keys in enumerate(chunks):
+            fn = f"model-{j + 1:05d}-of-00003.safetensors"
+            path = os.path.join(src, "ckpt", fn)
+            st.save(path, {k: want[k] for k in keys})
+            where.update({k: fn for k in keys})
+            sha = hashlib.sha256(open(path, "rb").read()).hexdigest()
+            files.append((f"ckpt/{fn}", os.path.getsize(path), sha, "file://" + path))
+        os.makedirs(os.path.join(dest, "ckpt"))
+        with open(os.path.join(dest, "ckpt", "model.safetensors.index.json"), "w") as f:
+            json.dump({"weight_map": where}, f)
+        stream = ShardStream(files, dest, ahead=1, log=lambda *a: None)
+        shards = StreamedSharded(os.path.join(dest, "ckpt"), stream, "ckpt/")
+        for k in names:
+            assert np.array_equal(shards.get(k), want[k]), k
+        assert stream.peak_files <= 3, stream.peak_files
+        try:
+            shards.get(names[0])
+            raise AssertionError("a read from a deleted shard must be refused")
+        except RuntimeError as e:
+            assert "read past" in str(e)
+        shards.close()
+        stream.close()
+        assert not [f for f in os.listdir(os.path.join(dest, "ckpt")) if f.endswith(".safetensors")]
+
+
+def _mini_minimax_checkpoint(d: str, shards: int = 3):
+    """A random MiniMax-H3-Image transformer in the original checkpoint's layout, tiny, its blocks spread over shards
+    in order (as the release's are), with the per-step heads and grid."""
+    import json
+    from h3metal import st
+    D, H, hd, F, TE, TXT, L = 256, 2, 128, 512, 256, 256, 3
+    inner = H * hd
+    rng = np.random.default_rng(1)
+    r = lambda *s: (rng.standard_normal(s) / np.sqrt(s[-1])).astype(np.float32)  # noqa: E731
+    one = lambda n: (1 + 0.1 * rng.standard_normal(n)).astype(np.float32)  # noqa: E731
+    t = {"time_embedder.proj_in.weight": r(TE, 256), "time_embedder.proj_in.bias": r(TE),
+         "time_embedder.proj_out.weight": r(TE, TE), "time_embedder.proj_out.bias": r(TE),
+         "video_patch_proj.weight": r(D, 96), "video_patch_proj.bias": r(D),
+         "condition_proj.weight": r(D, TXT), "condition_proj.bias": r(D),
+         "final_layer.adaln_proj.linear.weight": r(2 * D, TE), "final_layer.adaln_proj.linear.bias": r(2 * D),
+         "final_layer.norm.weight": one(D), "token_refiner.final_norm.weight": one(D),
+         "final_layer.video_out.weight": r(96, D), "final_layer.video_out.bias": r(96)}
+    blocks = [f"token_refiner.blocks.{i}" for i in range(2)] + [f"blocks.{l}" for l in range(L)]
+    for b in blocks:
+        t.update({f"{b}.attn.qkv_proj.weight": r(3 * inner, D), f"{b}.attn.out_proj.weight": r(D, inner),
+                  f"{b}.attn.q_norm.weight": one(hd), f"{b}.attn.k_norm.weight": one(hd),
+                  f"{b}.mlp.fc1.weight": r(2 * F, D), f"{b}.mlp.fc2.weight": r(D, F),
+                  f"{b}.norm1.weight": one(D), f"{b}.norm2.weight": one(D)})
+        if b.startswith("blocks."):
+            t.update({f"{b}.adaln_proj.linear.weight": r(18 * D, TE) * 0.5, f"{b}.adaln_proj.linear.bias": r(18 * D)})
+    os.makedirs(os.path.join(d, "transformer"), exist_ok=True)
+    order = [k for k in t if not k.startswith("blocks.")] + [k for b in blocks[2:] for k in t if k.startswith(b + ".")]
+    per = -(-len(order) // shards)
+    where = {}
+    for j in range(shards):
+        fn = f"model-{j + 1:05d}-of-{shards:05d}.safetensors"
+        keys = order[j * per:(j + 1) * per]
+        st.save(os.path.join(d, "transformer", fn), {k: t[k] for k in keys})
+        where.update({k: fn for k in keys})
+    with open(os.path.join(d, "transformer", "model.safetensors.index.json"), "w") as f:
+        json.dump({"weight_map": where}, f)
+    with open(os.path.join(d, "transformer", "config.json"), "w") as f:
+        json.dump({"hidden_size": D, "num_layers": L, "token_refiner_num_layers": 2, "num_attention_heads": H,
+                   "attention_head_dim": hd, "ffn_hidden_size": F, "latents_dim": 24, "patch_size": [1, 2, 2],
+                   "text_dim": TXT, "timestep_input_dim": 256, "time_embed_hidden_size": TE, "time_embed_dim": TE,
+                   "rope_inv_freq_len": 16, "norm_eps": 1e-5, "qk_norm_eps": 1e-5, "final_norm_eps": 1e-5}, f)
+    st.save(os.path.join(d, "pdd_fused_heads.safetensors"),
+            {"video_out.weight": r(6, 96, D), "video_out.bias": r(6, 96)})
+    with open(os.path.join(d, "pdd_config.json"), "w") as f:
+        json.dump({"sigmas": [1.0, 0.9675, 0.8875, 0.75, 0.5328, 0.232, 0.0]}, f)
+    return sorted(set(where.values()))
+
+
+def test_streamed_conversion_is_the_same():
+    """MiniMax-H3-Image's transformer converted while its shards stream in (and go) is byte for byte the one
+    converted from the whole checkpoint, and no more than three shards were on disk at once."""
+    import hashlib
+    import shutil
+    from h3metal.convert import convert_dit
+    from h3metal.stream import ShardStream, StreamedSharded
+    fmts = {"qkv": "q8", "out": "q8", "fc1": "q4", "fc2": "q4"}
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dest:
+        names = _mini_minimax_checkpoint(src)
+        convert_dit(src, os.path.join(src, "whole.h3m"), fmts=fmts, log=lambda *a: None)
+        os.makedirs(os.path.join(dest, "transformer"))
+        for f in ("transformer/config.json", "transformer/model.safetensors.index.json", "pdd_config.json",
+                  "pdd_fused_heads.safetensors"):
+            shutil.copy(os.path.join(src, f), os.path.join(dest, f))
+        files = []
+        for fn in names:
+            path = os.path.join(src, "transformer", fn)
+            files.append((f"transformer/{fn}", os.path.getsize(path), hashlib.sha256(open(path, "rb").read()).hexdigest(),
+                          "file://" + path))
+        stream = ShardStream(files, dest, ahead=1, log=lambda *a: None)
+        shards = StreamedSharded(os.path.join(dest, "transformer"), stream, "transformer/")
+        convert_dit(dest, os.path.join(dest, "streamed.h3m"), fmts=fmts, shards=shards, log=lambda *a: None)
+        shards.close()
+        stream.close()
+        a = open(os.path.join(src, "whole.h3m"), "rb").read()
+        b = open(os.path.join(dest, "streamed.h3m"), "rb").read()
+        assert a == b, "the streamed conversion differs"
+        assert stream.peak_files <= 3, stream.peak_files
+        assert not [f for f in os.listdir(os.path.join(dest, "transformer")) if f.endswith(".safetensors")]
+
+
 def test_dit_files():
     """Which transformer file runs how many steps: the six-step one by default, the few-step one for 2-4."""
     from h3metal.pipeline import dit_files

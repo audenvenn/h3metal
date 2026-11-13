@@ -278,6 +278,11 @@ def cmd_download(a):
         path = download_lora(a.lora, a.source)
         print(f"next: h3metal generate ... --lora {os.path.splitext(os.path.basename(path))[0]}")
         return
+    if a.convert:
+        if a.model != "minimax-h3":
+            raise ValueError("--convert streams MiniMax-H3-Image's checkpoint; the other models download ready to "
+                             "run (or with --original, then `h3metal convert`)")
+        return download_and_convert(a)
     alias = {"z-image-turbo": "zimage", "flux2-klein-4b": "flux2"}.get(a.model)
     if a.model in CONVERTED and not a.original:
         if a.source == "huggingface":
@@ -306,6 +311,55 @@ def cmd_download(a):
     if not download(a.dest, a.source, a.jobs, model=a.model):
         sys.exit("some files did not download; run the command again to resume")
     print(f"next: h3metal convert {a.dest}")
+
+
+def download_and_convert(a):
+    """MiniMax-H3-Image downloaded and converted at once (download --convert). The shards come in the order the
+    converters read them and go once converted (h3metal/stream.py), so the disk needs room for the converted model
+    (~44 GB) and about 17 GB of shards in flight, not the ~125 GB checkpoint as well. A part already converted is
+    skipped, so running the command again resumes."""
+    import shutil
+    from .convert import convert_dit
+    from .download import _fetch_all, minimax_plan
+    from .stream import ShardStream, StreamedSharded
+    from .te import convert_te, convert_vision
+    from .vae import convert_vae
+    ckpt = os.path.abspath(os.path.expanduser(a.dest or "~/.h3metal/checkpoint"))  # small files, shards in flight
+    out = DEFAULT_MODEL
+    os.makedirs(out, exist_ok=True)
+    small, te_shards, dit_shards = minimax_plan(a.source, ckpt)
+    if not _fetch_all(small, ckpt, a.jobs, print, "configs, tokenizer, VAE"):
+        sys.exit("some files did not download; run the command again to resume")
+    shutil.copy(os.path.join(ckpt, "tokenizer", "tokenizer.json"), os.path.join(out, "tokenizer.json"))
+    if not os.path.exists(os.path.join(out, "vae.h3m")):
+        convert_vae(ckpt, os.path.join(out, "vae.h3m"), fmt="f16")
+    shutil.rmtree(os.path.join(ckpt, "vae"), ignore_errors=True)  # 2.2 GB, converted
+    te_dir = os.path.join(ckpt, "text_encoder")
+    if not all(os.path.exists(os.path.join(out, f)) for f in ("vision.h3m", "te.h3m")):
+        stream = ShardStream(te_shards, ckpt, ahead=1)
+        shards = StreamedSharded(te_dir, stream, "text_encoder/")
+        try:
+            if not os.path.exists(os.path.join(out, "vision.h3m")):
+                convert_vision(te_dir, os.path.join(out, "vision.h3m"), shards=shards)
+            if not os.path.exists(os.path.join(out, "te.h3m")):
+                convert_te(te_dir, os.path.join(out, "te.h3m"), fmt="q8", shards=shards)
+        finally:
+            shards.close()
+            stream.close()
+    if not os.path.exists(os.path.join(out, "dit.h3m")):
+        fmt = FORMAT_ALIASES.get(auto_format(), auto_format())
+        print(f"transformer format for this Mac: {fmt}")
+        fmts = dict(zip(("qkv", "out", "fc1", "fc2"), fmt.split(","))) if "," in fmt else \
+            {k: fmt for k in ("qkv", "out", "fc1", "fc2")}
+        stream = ShardStream(dit_shards, ckpt, ahead=1)
+        shards = StreamedSharded(os.path.join(ckpt, "transformer"), stream, "transformer/")
+        try:
+            convert_dit(ckpt, os.path.join(out, "dit.h3m"), fmts=fmts, shards=shards)
+        finally:
+            shards.close()
+            stream.close()
+    print(f"converted into {out}; {ckpt} holds only small files now and can be deleted")
+    print("next: h3metal generate -p \"...\"")
 
 
 def _check_device(device: str):
@@ -421,6 +475,9 @@ def main(argv=None):
                         "the converted weights")
     d.add_argument("--lora", metavar="OWNER/NAME[/FILE]",
                    help="fetch a LoRA adapter's .safetensors file into ~/.h3metal/loras instead (from --source)")
+    d.add_argument("--convert", action="store_true",
+                   help="MiniMax-H3-Image: convert while downloading, deleting each shard once converted, so the "
+                        "disk needs room for the converted model (~44 GB) and ~17 GB more, not the checkpoint too")
     d.add_argument("--accept-license", action="store_true",
                    help="accept a model's own license where it asks for that (FLUX.2 [klein] 9B: the FLUX "
                         "Non-Commercial License)")
