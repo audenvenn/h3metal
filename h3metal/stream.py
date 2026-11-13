@@ -113,6 +113,9 @@ class StreamedSharded(Sharded):
         return self.files[fn]
 
     def close(self):
-        for other in list(self.files):
-            del self.files[other]
-            self.stream.release(self.prefix + other)
+        """Drops the open shards and deletes every shard the stream fetched for this directory, opened or not
+        (one fetched ahead that was never needed, for instance)."""
+        self.files.clear()
+        for path in list(self.stream.done):
+            if path.startswith(self.prefix):
+                self.stream.release(path)

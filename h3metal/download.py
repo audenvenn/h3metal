@@ -227,10 +227,11 @@ def download(dest: str, source: str = "huggingface", jobs: int = 4, log=print, m
     return _fetch_all(todo, dest, jobs, log, f"{repo} [{source}]")
 
 
-def minimax_plan(source: str = "huggingface", dest: str | None = None):
+def minimax_plan(source: str = "huggingface", dest: str | None = None, vision: bool = True, te: bool = True):
     """MiniMax-H3-Image's checkpoint for converting while downloading: (the small files: configs, tokenizer, the
-    VAE, the per-step heads; the text encoder's shards that h3metal reads, vision tower first, then by layer; the
-    transformer's shards by block). dest receives the text encoder's index, which says what its shards hold."""
+    VAE, the per-step heads; the text encoder's shards that the parts still to convert read, the vision tower's
+    first, then by layer; the transformer's shards by block). dest receives the text encoder's index, which says
+    what its shards hold. vision, te: whether those parts are still to convert."""
     files = list_files(source)
     idx_item = [f for f in files if f[0] == "text_encoder/model.safetensors.index.json"]
     if not idx_item:
@@ -244,11 +245,16 @@ def minimax_plan(source: str = "huggingface", dest: str | None = None):
     keep = needed(files, index)
     is_shard = lambda f: fnmatch.fnmatch(f[0], "*/model-*.safetensors")  # noqa: E731
     small = [f for f in keep if not is_shard(f)]
-    visual = {s for k, s in (index or {}).get("weight_map", {}).items() if "visual" in k}
-    te = sorted((f for f in keep if is_shard(f) and f[0].startswith("text_encoder/")),
-                key=lambda f: (os.path.basename(f[0]) not in visual, f[0]))
+    wm = (index or {}).get("weight_map", {})
+    visual = {s for k, s in wm.items() if "visual" in k}
+    layers = {s for k, s in wm.items() if "language_model" in k and ("embed_tokens" in k or (
+        ".layers." in k and int(k.split(".layers.")[1].split(".")[0]) < N_LAYERS))}
+    wanted = (visual if vision else set()) | (layers if te else set())
+    te_shards = sorted((f for f in keep if is_shard(f) and f[0].startswith("text_encoder/")
+                        and os.path.basename(f[0]) in wanted),
+                       key=lambda f: (os.path.basename(f[0]) not in visual or not vision, f[0]))
     dit = sorted((f for f in keep if is_shard(f) and f[0].startswith("transformer/")), key=lambda f: f[0])
-    return small, te, dit
+    return small, te_shards, dit
 
 
 LORA_DIR = os.path.expanduser("~/.h3metal/loras")

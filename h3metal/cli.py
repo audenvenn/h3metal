@@ -329,7 +329,10 @@ def download_and_convert(a):
     ckpt = os.path.abspath(os.path.expanduser(a.dest or "~/.h3metal/checkpoint"))  # small files, shards in flight
     out = DEFAULT_MODEL
     os.makedirs(out, exist_ok=True)
-    small, te_shards, dit_shards = minimax_plan(a.source, ckpt)
+    done = lambda f: os.path.exists(os.path.join(out, f))  # noqa: E731  (a part converted before is kept)
+    small, te_shards, dit_shards = minimax_plan(a.source, ckpt, vision=not done("vision.h3m"), te=not done("te.h3m"))
+    if done("vae.h3m"):
+        small = [f for f in small if not f[0].startswith("vae/")]  # converted, and its source deleted
     if not _fetch_all(small, ckpt, a.jobs, print, "configs, tokenizer, VAE"):
         sys.exit("some files did not download; run the command again to resume")
     shutil.copy(os.path.join(ckpt, "tokenizer", "tokenizer.json"), os.path.join(out, "tokenizer.json"))

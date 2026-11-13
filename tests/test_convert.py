@@ -234,6 +234,16 @@ def test_streamed_shards():
         shards.close()
         stream.close()
         assert not [f for f in os.listdir(os.path.join(dest, "ckpt")) if f.endswith(".safetensors")]
+        # A converter that stops early (a part converted before): the shard fetched ahead goes too.
+        import time
+        stream = ShardStream(files, dest, ahead=1, log=lambda *a: None)
+        shards = StreamedSharded(os.path.join(dest, "ckpt"), stream, "ckpt/")
+        shards.get(names[0])
+        while len(stream.done) < 2:
+            time.sleep(0.05)
+        shards.close()
+        stream.close()
+        assert not [f for f in os.listdir(os.path.join(dest, "ckpt")) if f.endswith(".safetensors")]
 
 
 def _mini_minimax_checkpoint(d: str, shards: int = 3):
