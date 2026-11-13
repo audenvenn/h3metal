@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "h3metal"
-version = "0.5.0"
+version = "0.5.1"
 description = "FLUX.2 [klein] 4B and 9B, Z-Image-Turbo and MiniMax-H3-Image on Apple Silicon, with LoRA adapters and its own Metal engine for the GPU neural accelerators."
 readme = "README.md"
 license = { text = "Apache-2.0" }

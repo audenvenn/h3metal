@@ -609,7 +609,9 @@ class Flux2Pipeline:
         self.paths = {k: os.path.join(model_dir, f"{k}.h3m") for k in ("te", "dit", "vae")}
         for k, p in self.paths.items():
             if not os.path.exists(p):
-                raise FileNotFoundError(f"missing {p}: convert a FLUX.2 [klein] checkpoint with `h3metal convert` first")
+                raise FileNotFoundError(f"missing {p}: `h3metal download --model flux2-klein-4b` fetches 4B ready to "
+                                        "run; 9B takes `h3metal download --model flux2-klein-9b --accept-license` "
+                                        "and `h3metal convert`")
         self.tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
         self.model_name = flux2_name(model_dir)
         self._te_cache: dict[str, np.ndarray] = {}

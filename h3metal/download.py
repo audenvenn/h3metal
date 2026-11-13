@@ -1,4 +1,10 @@
-"""`h3metal download`: fetch the files of an official checkpoint that h3metal reads.
+"""`h3metal download`: fetch converted weights, or the files of an official checkpoint that h3metal reads.
+
+Converted weights (CONVERTED) are h3metal's own files, ready to run: 10.7 GB for Z-Image-Turbo instead of a
+33 GB checkpoint and a conversion, 8.3 GB for FLUX.2 [klein] 4B instead of 15 GB. Each h3metal version fetches
+them at a fixed tag of their repository, the layout it reads; a converter change that alters a layout gets a
+new tag. They are the bytes `h3metal convert` makes with its default settings, and every file is checked
+against its published SHA-256.
 
 The official repository holds about 204 GB: the transformer twice (original
 and diffusers layout), the VAE twice, and the whole 64-layer text encoder.
@@ -41,6 +47,11 @@ OTHER = {"z-image-turbo": {"huggingface": "Tongyi-MAI/Z-Image-Turbo", "modelscop
                             # FLUX Non-Commercial License v2.1: `h3metal download` asks for --accept-license
                             "license": "FLUX Non-Commercial License v2.1 (non-commercial use only; see LICENSE.md "
                                        "in the downloaded directory)"}}
+# Converted weights on Hugging Face: repository, the tag holding the layout this version reads, the directory
+# they go to. (FLUX.2 [klein] 9B's license does not let h3metal publish converted copies.)
+CONVERTED = {"z-image-turbo": {"repo": "audenvenn/h3metal-z-image-turbo", "revision": "h3m-1", "dest": "zimage"},
+             "flux2-klein-4b": {"repo": "audenvenn/h3metal-flux2-klein-4b", "revision": "h3m-1",
+                                "dest": "flux2-klein"}}
 UA = {"User-Agent": "h3metal-download"}
 N_LAYERS = 50
 
@@ -137,6 +148,27 @@ def _fetch_all(todo, dest: str, jobs: int, log, what: str) -> bool:
             ok &= good
     log(f"done in {time.time() - t0:.0f} s")
     return ok
+
+
+class NotPublished(Exception):
+    """The converted weights' repository or tag does not exist (yet)."""
+
+
+def download_converted(dest: str, model: str, jobs: int = 4, log=print) -> bool:
+    """h3metal's converted weights for model, at the tag this version reads. Raises NotPublished if Hugging Face
+    has no such repository or tag; network errors propagate."""
+    import urllib.error
+    c = CONVERTED[model]
+    try:
+        listing = list_files("huggingface", c["repo"], c["revision"])
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 404):  # Hugging Face answers 401 for a repository that does not exist
+            raise NotPublished(f"{c['repo']}@{c['revision']} is not published") from e
+        raise
+    files = [f for f in listing if not f[0].startswith(".")]
+    if not any(f[0].endswith(".h3m") for f in files):
+        raise SystemExit(f"{c['repo']}@{c['revision']} holds no weight files")
+    return _fetch_all(sorted(files, key=lambda f: f[1]), dest, jobs, log, f"{c['repo']}@{c['revision']}")
 
 
 def download(dest: str, source: str = "huggingface", jobs: int = 4, log=print, model: str = "minimax-h3") -> bool:

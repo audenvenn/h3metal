@@ -153,32 +153,58 @@ def test_cli_sizes_and_device_check():
 
 
 def test_download_choices():
-    """Which repository and files `h3metal download` fetches for each model and source (no network: the listing
-    and the fetches are stand-ins)."""
+    """What `h3metal download` fetches for each model and source (no network: the listings and the fetches are
+    stand-ins): converted weights from Hugging Face at the pinned tag by default for Z-Image-Turbo and FLUX.2
+    [klein] 4B, the official checkpoint with --original, from ModelScope, while the converted weights are not
+    published, and for the other models; klein 9B only with its license accepted."""
+    import urllib.error
     from h3metal import cli, download as dl
     real = dl._json, dl._fetch_all
-    seen = []
+    seen, urls = [], []
+    official = ("model_index.json", "transformer/a.safetensors", "flux-2-klein-4b.safetensors",
+                "flux-2-klein-9b.safetensors", "sample.jpg")
+
+    def listing(url):
+        urls.append(url)
+        if "/api/models/audenvenn/h3metal-" in url:  # converted weights
+            return {"siblings": [{"rfilename": "dit.h3m", "size": 3, "lfs": {"sha256": "ab"}},
+                                 {"rfilename": ".gitattributes", "size": 1}]}
+        if "modelscope" in url:
+            return {"Code": 200, "Data": {"Files": [{"Path": n, "Size": 1, "Type": "blob"} for n in official]}}
+        return {"siblings": [{"rfilename": n, "size": 1} for n in official]}
     try:
-        names = ("model_index.json", "transformer/a.safetensors", "flux-2-klein-4b.safetensors",
-                 "flux-2-klein-9b.safetensors", "sample.jpg")
-        dl._json = lambda url: {"Code": 200, "Data": {"Files": [{"Path": n, "Size": 1, "Type": "blob"} for n in names]}} \
-            if "modelscope" in url else {"siblings": [{"rfilename": n, "size": 1} for n in names]}
-        dl._fetch_all = lambda todo, dest, jobs, log, what: seen.append((what, dest, [f[0] for f in todo])) or True
-        cli.main(["download", "--model", "flux2-klein-4b"])
-        cli.main(["download", "--model", "z-image-turbo", "--source", "modelscope"])
+        dl._json = listing
+        dl._fetch_all = lambda todo, dest, jobs, log, what: seen.append((what, dest, sorted(f[0] for f in todo))) or True
         home = os.path.expanduser("~/.h3metal")
-        assert seen[0][:2] == ("black-forest-labs/FLUX.2-klein-4B [huggingface]", f"{home}/flux2-klein-4b") and \
-            sorted(seen[0][2]) == ["flux-2-klein-9b.safetensors", "model_index.json", "transformer/a.safetensors"]
-        assert seen[1][:2] == ("Tongyi-MAI/Z-Image-Turbo [modelscope]", f"{home}/z-image-turbo"), seen[1]
+        rev = dl.CONVERTED["flux2-klein-4b"]["revision"]
+        cli.main(["download", "--model", "flux2-klein-4b"])
+        assert seen[-1] == (f"audenvenn/h3metal-flux2-klein-4b@{rev}", f"{home}/flux2-klein", ["dit.h3m"]), seen[-1]
+        assert urls[-1].endswith(f"/revision/{rev}?blobs=true"), urls[-1]
+        cli.main(["download", "--model", "z-image-turbo"])
+        assert seen[-1][:2] == (f"audenvenn/h3metal-z-image-turbo@{rev}", f"{home}/zimage"), seen[-1]
+        cli.main(["download", "--model", "flux2-klein-4b", "--original"])  # no duplicate transformer, no samples
+        assert seen[-1] == ("black-forest-labs/FLUX.2-klein-4B [huggingface]", f"{home}/flux2-klein-4b",
+                            ["flux-2-klein-9b.safetensors", "model_index.json", "transformer/a.safetensors"]), seen[-1]
+        cli.main(["download", "--model", "z-image-turbo", "--source", "modelscope"])
+        assert seen[-1][:2] == ("Tongyi-MAI/Z-Image-Turbo [modelscope]", f"{home}/z-image-turbo"), seen[-1]
+        n = len(seen)
         try:  # klein 9B's license is non-commercial: no download without accepting it
             cli.main(["download", "--model", "flux2-klein-9b"])
             raise AssertionError("the 9B download did not ask for the license")
         except SystemExit as e:
             assert "Non-Commercial" in str(e) and "--accept-license" in str(e), e
-        assert len(seen) == 2
+        assert len(seen) == n
         cli.main(["download", "--model", "flux2-klein-9b", "--source", "modelscope", "--accept-license"])
-        assert seen[2][:2] == ("black-forest-labs/FLUX.2-klein-9B [modelscope]", f"{home}/flux2-klein-9b") and \
-            sorted(seen[2][2]) == ["flux-2-klein-4b.safetensors", "model_index.json", "transformer/a.safetensors"]
+        assert seen[-1] == ("black-forest-labs/FLUX.2-klein-9B [modelscope]", f"{home}/flux2-klein-9b",
+                            ["flux-2-klein-4b.safetensors", "model_index.json", "transformer/a.safetensors"]), seen[-1]
+
+        def unpublished(url):  # Hugging Face answers 401 for a repository that does not exist
+            if "/api/models/audenvenn/h3metal-" in url:
+                raise urllib.error.HTTPError(url, 401, "Repository not found", None, None)
+            return listing(url)
+        dl._json = unpublished
+        cli.main(["download", "--model", "z-image-turbo"])  # then the official checkpoint, as before
+        assert seen[-1][:2] == ("Tongyi-MAI/Z-Image-Turbo [huggingface]", f"{home}/z-image-turbo"), seen[-1]
     finally:
         dl._json, dl._fetch_all = real
 
