@@ -132,3 +132,60 @@ output layers (0.8 ms a step instead of 38 ms as float) and tiles swept at FLUX.
 from 69% to 73%. The next step is a product with two quantized inputs for the single-stream blocks' output
 projection: it would accumulate the attention and MLP parts in one pass over the residual stream instead of
 two.
+
+## FLUX.2 [klein] 9B
+
+[FLUX.2 [klein] 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) is the larger klein, released
+under the FLUX Non-Commercial License v2.1 (see the README for its terms). It has the same architecture and
+the same pipeline as 4B, made wider:
+
+- the transformer has 4,096 channels (32 heads) instead of 3,072;
+- it has eight double-stream and 24 single-stream blocks;
+- its text encoder is Qwen3-8B, read at the same taps (9, 18 and 27): 12,288 features per token.
+
+```sh
+h3metal download --model flux2-klein-9b --accept-license   # 35 GB (--source modelscope works too)
+h3metal convert ~/.h3metal/flux2-klein-9b                  # int8, 17 GB, about two minutes, into ~/.h3metal/flux2-klein-9b-h3m
+h3metal generate --model flux2-9b -p "A lighthouse on a rocky coast at dusk" -o lighthouse.png
+```
+
+Nothing in the engine changed for it: the converter and the transformer read their sizes from the config.
+
+**Tiles.** Every tile `_ftile` picks at 9B's shapes is checked against float64 by `tests/test_gemm.py`. A sweep at
+those shapes found the chosen tiles within 0-4% of the best ones, so the rules stay as swept for 4B.
+
+**Fidelity.** A float32 reference of the whole model does not fit a 24 GB Mac (MPS refuses 16 GB of float32
+transformer weights for 4B already). So the real weights are checked in two parts:
+
+- the first double-stream and the first single-stream block, with every embedding and modulation layer;
+- the text encoder's first four layers.
+
+Both are compared with float32 on the CPU (`tests/ref/flux2_truncated.py`, `tests/test_flux2_truncated.py`).
+The same check on 4B, whose whole pipeline is compared with diffusers above, calibrates the numbers:
+
+| Relative error against float32 | 9B | 4B |
+|---|---:|---:|
+| transformer step, one block of each kind | 0.11% | 0.38% |
+| text encoder, hidden state 2 (prompt rows / padding rows) | 0.69% / 0.91% | 0.83% / 1.27% |
+| text encoder, hidden state 3 (prompt rows / padding rows) | 0.72% / 1.04% | 0.83% / 1.69% |
+
+The checks feed the transformer h3metal's caption features for a real prompt. A few channels of real ones
+are two orders of magnitude above the rest, which random features would not exercise. They compare
+hidden state 3 rather than 4 for a reason: transformers normalizes the last hidden state it returns (4 in the
+truncated model), and the pipeline's taps never are the last one.
+
+**Speed.** On the Mac mini (M6, 24 GB), against mflux 0.24 with its own 8-bit copy, four steps, every run a
+fresh process:
+
+| Size | h3metal | mflux | Speed-up |
+|---|---:|---:|---:|
+| 1024 x 1024, new prompt every run | 14.1 s (14.1, 14.1) | 31.9 s (32.0, 31.7) | 2.3x |
+| 1024 x 1024, prompt seen before (2 runs after a warm-up) | 12.4 s (12.8, 11.9) | 31.8 s (31.6, 31.9) | 2.6x |
+
+mflux's copy was saved once with `mflux-save --model <checkpoint> --base-model flux2-klein-9b --quantize 8`.
+The method is the 4B one ([benchmarks](benchmarks.md#flux2-klein-9b-against-mflux)): `bench/speed.py`,
+fresh processes, alternating, 60 s pauses.
+
+One transformer step at 1024 x 1024 takes 2.71 s, 71% of what the matrix units need at their measured peaks
+(1.93 s). The products take 73% of the step, attention 21%, the row kernels 6%. In int8 the transformer is
+10.2 GB and the text encoder's 27 layers 6.5 GB. They take turns in memory, as for 4B. The process footprint peaks at 2.3 GB, besides the 17 GB of weight files it maps. mflux's peaks at 13.9 GB.

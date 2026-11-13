@@ -6,7 +6,7 @@
 Image generation on Apple silicon, with its own Metal engine for the matrix
 units of the M5/M6 GPU. It runs [Z-Image-Turbo](#z-image-turbo) (Tongyi-MAI,
 6 B, Apache-2.0), [FLUX.2 [klein] 4B](#flux2-klein) (Black Forest Labs,
-Apache-2.0) and
+Apache-2.0) and 9B (non-commercial), and
 [MiniMax-H3-Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image) (33 B,
 text-to-image and image editing). Their transformers run on int8 matrix
 products and attention at 73-80% of what the matrix units can do at their
@@ -43,7 +43,7 @@ and M6-class GPUs; it is developed and measured on an M6. The release's
 wheel holds the compiled GPU runtime, so nothing needs building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.4.0/h3metal-0.4.0-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.5.0/h3metal-0.5.0-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, 15 GB (--source modelscope also works)
 h3metal convert ~/.h3metal/flux2-klein-4b  # int8, into ~/.h3metal/flux2-klein, about a minute
@@ -337,6 +337,21 @@ own 8-bit copy of the model, four steps, every run a fresh process
 | 1024 x 1024, prompt seen before | 6.2 s | 15.3 s | 2.5x |
 
 A transformer step runs at 73% of the matrix units' floor.
+
+[FLUX.2 [klein] 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B),
+the larger klein, runs the same way. It is under the FLUX Non-Commercial
+License ([below](#the-models-licenses)):
+
+```sh
+h3metal download --model flux2-klein-9b --accept-license   # 35 GB
+h3metal convert ~/.h3metal/flux2-klein-9b                  # int8, 17 GB, into ~/.h3metal/flux2-klein-9b-h3m
+h3metal generate --model flux2-9b -p "A lighthouse on a rocky coast at dusk" -o lighthouse.png
+```
+
+On the Mac mini, 9B makes a 1024 x 1024 image in 14.1 s from a new prompt.
+mflux 0.24 with its own 8-bit copy takes 31.9 s on the same machine, so
+h3metal is 2.3 times faster; with the prompt seen before it is 12.4 s against
+31.8 s ([docs/flux2.md](docs/flux2.md#flux2-klein-9b)).
 
 With the same prompt, noise and text embeddings as diffusers'
 `Flux2KleinPipeline` in bfloat16, h3metal's transformer and decoder

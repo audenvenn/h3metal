@@ -6,10 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13
+
 ### Added
 
+- FLUX.2 [klein] 9B (Black Forest Labs, FLUX Non-Commercial License v2.1).
+  - Commands: `h3metal download --model flux2-klein-9b --accept-license`,
+    then `h3metal convert`, then `h3metal generate --model flux2-9b`, with
+    edits and LoRA adapters.
+  - Speed: a 1024 x 1024 image takes 14.1 s from a new prompt on an M6
+    Mac mini, 2.3 times faster than mflux 0.24 on the same machine.
+  - Fidelity: on real weights its transformer matches float32 to 0.11% and
+    its text encoder to 0.7-1.0%, as close as 4B's. The check runs on one
+    block of each kind and the first text-encoder layers
+    (`tests/test_flux2_truncated.py`), because a float32 reference of the
+    whole model does not fit the Mac.
 - `h3metal download --lora OWNER/NAME[/FILE]` fetches a LoRA adapter into
   `~/.h3metal/loras`, where `--lora NAME` finds it by name.
+- The web page offers, for the selected model, the LoRA files that fit it.
+  It checks them from their headers.
 
 ## [0.4.0] - 2026-11-13
 
@@ -150,7 +165,8 @@ All notable changes to this project are documented here. The format follows
   check of a converted text encoder, and benchmarks of every kernel, of
   image quality and of end-to-end speed against another implementation.
 
-[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.5.0
 [0.4.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.4.0
 [0.3.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.3.0
 [0.2.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.2.0

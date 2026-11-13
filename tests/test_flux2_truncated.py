@@ -47,9 +47,9 @@ with tempfile.TemporaryDirectory() as d:
     convert_te(os.path.join(src, "text_encoder"), te_path, fmt="q8", layers=L, prefix="model", log=lambda *a: None)
     wf = WeightFile(gpu, te_path)
     n = int(r["n_valid"])
-    out = TextEncoder(gpu, wf).encode(r["ids"].tolist(), taps=(2, L), n_valid=n)
+    out = TextEncoder(gpu, wf).encode(r["ids"].tolist(), taps=(2, 3), n_valid=n)
     D = r["hs2"].shape[1]
-    for i, (k, hs) in enumerate((("hidden state 2", r["hs2"]), (f"hidden state {L}", r["hs4"]))):
+    for i, (k, hs) in enumerate((("hidden state 2", r["hs2"]), ("hidden state 3", r["hs3"]))):
         got = out[:, i * D:(i + 1) * D]
         print(f"{name} text encoder, {k}: prompt rows rel err {rel(got[:n], hs[:n]):.4f}, padding rows "
               f"{rel(got[n:], hs[n:]):.4f}")

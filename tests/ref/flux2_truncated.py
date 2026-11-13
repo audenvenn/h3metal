@@ -10,7 +10,8 @@ above the rest, which random features would not exercise. OUT_DIR receives:
   transformer/   a config with one block of each kind, next to links to SRC's weight shards (diffusers reads only
                  the blocks the config has), for h3metal's converter
   ref.npz        latents [n][C] (unit normal: the first step's noise), the caption features, image positions,
-                 sigma, the step's output (float32); the text encoder's ids and its hidden states 2 and 4 (float32)
+                 sigma, the step's output (float32); the text encoder's ids and its hidden states 2 and 3 (float32;
+                 transformers normalizes the last one, 4 here, which the pipeline's taps never are)
 """
 import json
 import os
@@ -68,6 +69,6 @@ with torch.no_grad():
     hs = te(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], output_hidden_states=True,
             use_cache=False).hidden_states
 rec.update(ids=enc["input_ids"][0].numpy(), n_valid=int(enc["attention_mask"].sum()), te_layers=TE_LAYERS,
-           hs2=hs[2][0].numpy(), hs4=hs[4][0].numpy())
+           hs2=hs[2][0].numpy(), hs3=hs[3][0].numpy())
 np.savez(os.path.join(out, "ref.npz"), **rec)
 print("saved", out, {k: getattr(v, "shape", v) for k, v in rec.items()})
