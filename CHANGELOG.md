@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-13
+
+### Fixed
+
+- `-s 16:9` (an aspect ratio without an area) asked FLUX.2 [klein] and
+  Z-Image-Turbo for MiniMax-H3-Image's 16 MP size (5472 x 3072), which runs
+  out of GPU memory. A ratio now takes the model's native area: 16 MP for
+  MiniMax-H3-Image as before, about 1 MP for the others (1376 x 768 at
+  16:9). `@4k`, `@2k` and `@1k` still choose the area.
+- An out-of-memory error from the GPU now says to try a smaller `-s`.
+
 ## [0.6.3] - 2026-11-13
 
 ### Fixed
