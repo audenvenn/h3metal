@@ -59,7 +59,18 @@ reads the 66 GB transformer checkpoint once and took 4 minutes on an M6 Mac mini
 
 ## Speed
 
-TABLE
+On the Mac mini (M6, 24 GB), int8 attention and int4 MLP weights, every run a fresh process with the prompt's
+embeddings cached (`bench/speed.py --variant`, see [benchmarks.md](benchmarks.md#minimax-h3-image-in-fewer-steps)):
+
+| Size | 6 steps (default model) | 4 steps (pDMD) | 2 steps (pDMD) |
+|---|---:|---:|---:|
+| 1024 x 1024 | 11.6 s | 9.1 s | 4.9 s |
+| 2048 x 2048 | 41.7 s | 29.0 s | 15.7 s |
+| 4096 x 4096 | 240.1 s | | 84.6 s |
+
+Two steps take 2.7 times less than six at 2048 x 2048 and 2.8 times less at 4096 x 4096: a step costs the same,
+and the transformer is most of the time. An edit with one reference at 2048 x 2048 took 48 s in two steps and
+118 s in six, from a new prompt.
 
 ## Images
 

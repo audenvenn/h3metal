@@ -26,7 +26,8 @@ On a Mac mini with an M6 (12-core GPU, 24 GB):
 - **MiniMax-H3-Image:** a 2048 x 2048 image takes 41 s (46 s with a new
   prompt) and a 4096 x 4096 image 236 s, 2.8 and 1.9 times faster than
   [h3-image-mlx](https://github.com/Anionex/h3-image-mlx) on the same
-  machine (4.5 times at 1024 x 1024).
+  machine (4.5 times at 1024 x 1024). In two steps with pDMD's distilled
+  LoRA it takes 16 s and 85 s ([docs/few-step.md](docs/few-step.md)).
 
 Z-Image-Turbo and FLUX.2 [klein] take LoRA adapters: style adapters and
 FLUX.2's edit adapters (outpainting, object removal, ...). They are applied
@@ -120,10 +121,18 @@ MiniMax-H3-Image expects a detailed English description of the whole image.
 MiniMax's API expands short prompts first (H3-Image-Context-IR), and for
 text-to-image MiniMax publishes a local prompt expander,
 [MiniMax-H3-Image-PE](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image-PE).
-h3metal uses the prompt as given. For an edit, say what should stay as well
-as what should change, including the exact wording of any text in the
-picture: with only "keep all text unchanged", small lettering can come out
-redrawn.
+h3metal uses the prompt as given.
+
+MiniMax-H3-Image also runs in 2, 3 or 4 steps (`--steps`) once
+`h3metal convert ~/.h3metal/checkpoint --pdmd` has written its few-step
+transformer, with pDMD's 2-step LoRA merged into the weights. At 2048 x 2048
+two steps take 16 s instead of 42 s. The six-step model stays the default:
+its fine texture and flat illustrations come out cleaner
+([docs/few-step.md](docs/few-step.md)).
+
+For an edit, say what should stay as well as what should change, including
+the exact wording of any text in the picture: with only "keep all text
+unchanged", small lettering can come out redrawn.
 
 A web page instead of the command line:
 

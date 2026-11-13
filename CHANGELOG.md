@@ -19,7 +19,8 @@ All notable changes to this project are documented here. The format follows
     are quantized, so it costs nothing at run time. The transformer's own
     output head, the grids of diffusers' MiniMaxH3Scheduler (shift 12) and
     its Euler update replace the six-step grid and its per-step heads.
-  - Speed on an M6 Mac mini: @@SPEED@@
+  - Speed on an M6 Mac mini: 15.7 s at 2048 x 2048 in 2 steps instead of 41.7 s
+    in 6, and 84.6 s instead of 240.1 s at 4096 x 4096.
   - Checks:
     - On a mini model against diffusers' MiniMax-H3 transformer with the
       adapter merged, the grids and the update are bit for bit the

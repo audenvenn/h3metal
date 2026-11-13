@@ -146,6 +146,33 @@ The same method and prompt as for 4B, with mflux's own 8-bit copy of 9B (`mflux-
 The process footprints are 2.3 GB for h3metal, which maps its 17 GB of weight files, and 13.9 GB for mflux.
 One transformer step at 1024 x 1024 takes 2.71 s, 71% of what the matrix units need at their measured peaks.
 
+## MiniMax-H3-Image in fewer steps
+
+The six-step model (`dit.h3m`) against the few-step transformer with pDMD's 2-step LoRA merged
+(`dit-pdmd.h3m`, [few-step.md](few-step.md)) at 4 and 2 steps, both in int8 attention and int4 MLP, the
+prompt's embeddings cached:
+
+```sh
+python bench/speed.py --sizes 1024,2048 --runs 2 --warmup --variant "6 steps=h3metal generate --min-area 1024" \
+    --variant "4 steps=h3metal generate --min-area 1024 --steps 4" \
+    --variant "2 steps=h3metal generate --min-area 1024 --steps 2" --out steps.json
+python bench/speed.py --sizes 4096 --runs 1 --variant "6 steps=h3metal generate --min-area 1024" \
+    --variant "2 steps=h3metal generate --min-area 1024 --steps 2" --out steps_4k.json
+```
+
+Means of two runs (one at 4096 x 4096):
+
+| Size | 6 steps (default model) | 4 steps (pDMD) | 2 steps (pDMD) |
+|---|---:|---:|---:|
+| 1024 x 1024 | 11.6 s | 9.1 s | 4.9 s |
+| 2048 x 2048 | 41.7 s | 29.0 s | 15.7 s |
+| 4096 x 4096 | 240.1 s | | 84.6 s |
+
+Single runs: 11.6 and 11.6 s, 9.1 and 9.1 s, 6.0 and 3.8 s at 1024 x 1024; 41.6 and 41.8 s, 29.0 and 29.0 s,
+16.2 and 15.2 s at 2048 x 2048. The variants alternate, and the two 15 GB transformer files do not both fit in
+24 GB, so a run sometimes maps a file the previous run evicted: the slower two-step run at 1024 x 1024 is one.
+The peak footprint is the same for both files: 0.7, 2.6 and 5.3-5.7 GB.
+
 ## Kernels
 
 `bench/hw/mma_rate.py` measures the matrix units on register fragments,
