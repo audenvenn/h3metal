@@ -350,6 +350,9 @@ struct QkRopeParams {
 
 // With QK8, queries and keys are written as int8 with one scale per row (qs, ks) for the
 // integer score product of kernels/attention.metal.
+#ifndef QKROT
+#define QKROT 0  // with QK8: rotate queries and keys before their int8 rounding (see below)
+#endif
 #ifndef QK8
 #define QK8 0
 #endif
@@ -414,6 +417,34 @@ kernel void qk_norm_rope(device const IN_T *in [[buffer(0)]],
         for (int i = 0; i < PER; i++) v[i] = first ? v[i] * c[i] - pv[i] * s[i] : v[i] * c[i] + pv[i] * s[i];
       }
     }
+#if QK8 && QKROT
+    // Queries and keys both rotated by R = diag(signs) H / sqrt(HDIM), H the Walsh-Hadamard matrix: R is
+    // orthonormal, so every product q.k, and with it attention, is unchanged. The rotation spreads the few channels
+    // that dominate a row (the rotary ones, mostly) over all of them before the row gets its one int8 scale.
+#pragma clang loop unroll(full)
+    for (int i = 0; i < PER; i++) {
+      const uint c = uint(lane) * PER + uint(i);
+      if (popcount(c * 0x2545F491u) & 1u) v[i] = -v[i];  // a fixed pseudo-random sign per channel
+    }
+#pragma clang loop unroll(full)
+    for (int s = 1; s < PER; s <<= 1) {  // butterflies within a lane's channels
+#pragma clang loop unroll(full)
+      for (int i = 0; i < PER; i++) {
+        if (!(i & s)) { const float a = v[i], b = v[i + s]; v[i] = a + b; v[i + s] = a - b; }
+      }
+    }
+#pragma clang loop unroll(full)
+    for (ushort ls = 1; ls < 32; ls <<= 1) {  // and across lanes: channel c pairs with c ^ (ls * PER)
+#pragma clang loop unroll(full)
+      for (int i = 0; i < PER; i++) {
+        const float o = simd_shuffle_xor(v[i], ls);
+        v[i] = (lane & ls) ? o - v[i] : v[i] + o;
+      }
+    }
+    const float rn = rsqrt(float(HDIM));
+#pragma clang loop unroll(full)
+    for (int i = 0; i < PER; i++) v[i] *= rn;
+#endif
     const size_t hrow = isq ? (size_t(sq) * p.Hq + h) * p.out_rows + r : (size_t(sq) * p.Hk + h) * p.out_rows + r;
     device QK_T *dst = (isq ? Q : K) + hrow * HDIM;
 #if QK8

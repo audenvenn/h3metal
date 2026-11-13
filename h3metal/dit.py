@@ -128,6 +128,9 @@ class DiT:
         self.attn_cfg = dict(wm=16, bk=32)
         # Integer score product in attention (queries and keys in int8, one scale per row).
         self.qk8 = os.environ.get("H3METAL_QK8", "1") == "1"
+        # Queries and keys rotated before that rounding (exact; ops.qk_norm_rope): on the real weights it halves the
+        # scores' share of the transformer's error (docs/design.md).
+        self.qk_rot = os.environ.get("H3METAL_QKROT", "1") == "1"
         self.resident = self._resident_blocks()
 
     def _resident_blocks(self) -> int:
@@ -199,7 +202,8 @@ class DiT:
         Kb = b["K"] if not q8 else b["K"].view(b["K"].shape, "i8")
         sc = dict(q_scale=b["qs"], k_scale=b["ks"]) if q8 else {}
         ops.qk_norm_rope(g, qkv, blk["q_norm"], blk["k_norm"], b["cos"], b["sin"], Qb, Kb, b["V"], M=S,
-                         Hq=H, Hk=H, Hv=H, hd=hd, out_rows=Sp, rot=rot, eps=self.cfg["qk_eps"], **sc)
+                         Hq=H, Hk=H, Hv=H, hd=hd, out_rows=Sp, rot=rot, eps=self.cfg["qk_eps"],
+                         qk_rot=self.qk_rot, **sc)
         ops.attention(g, Qb, Kb, b["V"], b["o"], Lq=S, L=S, H=H, KVH=H, D=hd, q_rows=Sp, k_rows=Sp,
                       scale=hd ** -0.5, **(self.attn_cfg_q8 if q8 else self.attn_cfg), **sc)
         ops.rot_q8(g, b["o"], a8.view((Sp, inner)), sa, S, inner)
