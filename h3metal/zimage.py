@@ -27,11 +27,12 @@ import time
 
 import numpy as np
 
-from . import ops
+from . import lora, ops
 from .convert import silu, timestep_embedding
 from .dit import _tile, patchify, unpatchify
 from .gpu import Gpu, Tensor
-from .quant import quantize, random_signs, rotate_in
+from .lora import LinearPlan, Part
+from .quant import quantize, random_signs
 from .st import Sharded
 from .weights import WeightFile, Writer
 
@@ -57,6 +58,61 @@ def _pair_perm(H: int, hd: int) -> np.ndarray:
     """Row order that turns adjacent-pair rotation into half-split rotation, per head."""
     one = np.concatenate([np.arange(0, hd, 2), np.arange(1, hd, 2)])
     return (np.arange(H)[:, None] * hd + one[None, :]).reshape(-1)
+
+
+def block_plans(name: str, prefix: str, layer: int, seed: int, D: int, F: int, H: int, hd: int,
+                modulated: bool) -> dict:
+    """One block's converted linear layers (h3metal/lora.py): which rows of which original layers, in which
+    order, with which signs, and the rotation of their inputs. The converter and the LoRA adapters both use
+    these, so an adapter goes through exactly the transforms of its layer."""
+    s_in, s_o = _signs(seed, layer, 1, D), _signs(seed, layer, 2, D)
+    s_mlp, s_f = _signs(seed, layer, 3, D), _signs(seed, layer, 4, F)
+    perm = _pair_perm(H, hd)
+    a, ff = f"{prefix}.attention", f"{prefix}.feed_forward"
+    plans = {
+        f"{name}.qkv": LinearPlan("qkv", [Part(f"{a}.to_q", D, rows=perm), Part(f"{a}.to_k", D, rows=perm),
+                                          Part(f"{a}.to_v", D, sign=s_o)], D, s_in),
+        f"{name}.out": LinearPlan("out", [Part(f"{a}.to_out.0", D)], D, s_o),
+        f"{name}.fc1": LinearPlan("fc1", [Part(f"{ff}.w3", F, sign=s_f), Part(f"{ff}.w1", F)], D, s_mlp),
+        f"{name}.fc2": LinearPlan("fc2", [Part(f"{ff}.w2", D)], F, s_f),
+    }
+    if modulated:  # the AdaLN projection: precomputed per step into the block's tables (block_tables)
+        plans[f"{name}.mod"] = LinearPlan("table", [Part(f"{prefix}.adaLN_modulation.0", 4 * D)], ADALN_DIM,
+                                          rotate=False)
+    return plans
+
+
+def model_plans(c: dict, seed: int) -> tuple:
+    """-> (plans of every converted linear layer, aliases): the aliases name the original checkpoint's fused
+    attention layers, which some LoRA trainers use, as the diffusers layers they span."""
+    D, H, hd, F, L, R = c["dim"], c["heads"], c["head_dim"], c["ffn"], c["layers"], c["refiner_layers"]
+    plans, aliases = {}, {}
+    blocks = [(f"context_refiner.{i}", f"cap_refiner.{i}", 2000 + i, False) for i in range(R)]
+    blocks += [(f"noise_refiner.{i}", f"x_refiner.{i}", 1000 + i, True) for i in range(R)]
+    blocks += [(f"layers.{i}", f"blocks.{i}", i, True) for i in range(L)]
+    for prefix, name, layer, modulated in blocks:
+        plans.update(block_plans(name, prefix, layer, seed, D, F, H, hd, modulated))
+        a = f"{prefix}.attention"
+        aliases[f"{a}.qkv"] = [(f"{a}.to_q", 0), (f"{a}.to_k", D), (f"{a}.to_v", 2 * D)]
+        aliases[f"{a}.out"] = [(f"{a}.to_out.0", 0)]
+    return plans, aliases
+
+
+def block_tables(mod: np.ndarray, norms: np.ndarray, s_in: np.ndarray, s_mlp: np.ndarray) -> dict:
+    """A modulated block's per-step tables, from its AdaLN output mod [steps][4][D] (scale_msa, gate_msa,
+    scale_mlp, gate_mlp) and its norm weights [4][D] (attention_norm1, attention_norm2, ffn_norm1, ffn_norm2):
+    the norm weights and the input rotations' signs are folded in, the gates go through tanh."""
+    n1, n2, m1, m2 = norms
+    sc_a, g_a, sc_m, g_m = (mod[:, i] for i in range(4))
+    g_a, g_m = np.tanh(g_a), np.tanh(g_m)
+    n = mod.shape[0]
+    D = mod.shape[2]
+    pre_a = np.zeros((n, 2, D), np.float32)
+    pre_m = np.zeros((n, 2, D), np.float32)
+    pre_a[:, 0] = n1 * (1.0 + sc_a) * s_in   # norm_mod_q8: rmsnorm(x) * scale' + shift (shift 0)
+    pre_m[:, 0] = m1 * (1.0 + sc_m) * s_mlp
+    return {"pre_attn": pre_a, "pre_mlp": pre_m, "post_attn": (g_a * n2).astype(np.float32),
+            "post_mlp": (g_m * m2).astype(np.float32)}  # x += post * rmsnorm(y)
 
 
 def convert_transformer(src: str, out: str, *, fmts=None, steps: int = 8, seed: int = 1, log=print):
@@ -85,6 +141,8 @@ def convert_transformer(src: str, out: str, *, fmts=None, steps: int = 8, seed: 
             "timesteps": t_steps.tolist(), "sigmas": sigmas.tolist(), "seed": seed, "fmts": f}
     w = Writer(out, meta)
     t0 = time.time()
+    plans, _ = model_plans(meta["config"], seed)
+    w.tensor("temb", temb, "f32", host_only=True)  # for LoRA adapters of the AdaLN projections
 
     # Z-Image orders a patch's features (dy, dx, channel); h3metal's patchify (h3metal/dit.py) orders them
     # (channel, dy, dx), so the embedding's columns and the final layer's rows are reordered to match.
@@ -107,44 +165,34 @@ def convert_transformer(src: str, out: str, *, fmts=None, steps: int = 8, seed: 
     w.tensor("final.b", np.ascontiguousarray(st.get("all_final_layer.2-1.linear.bias")[order], np.float32), "f32")
     perm = _pair_perm(H, hd)
 
-    def put(name, kind, mat):
-        codes, scales = quantize(f[kind], mat)
-        w.linear(name, f[kind], mat.shape[0], mat.shape[1], codes, scales)
+    def put(name):
+        plan = plans[name]
+        mat = plan.assemble(lambda m: st.get(f"{m}.weight"))
+        codes, scales = quantize(f[plan.kind], mat)
+        w.linear(name, f[plan.kind], mat.shape[0], mat.shape[1], codes, scales)
 
     def block(prefix: str, name: str, layer: int, modulated: bool):
-        s_in, s_o = _signs(seed, layer, 1, D), _signs(seed, layer, 2, D)
-        s_mlp, s_f = _signs(seed, layer, 3, D), _signs(seed, layer, 4, F)
         a = f"{prefix}.attention"
-        q = st.get(f"{a}.to_q.weight")[perm]
-        k = st.get(f"{a}.to_k.weight")[perm]
-        v = st.get(f"{a}.to_v.weight") * s_o[:, None]
-        put(f"{name}.qkv", "qkv", rotate_in(np.concatenate([q, k, v]), s_in))
-        put(f"{name}.out", "out", rotate_in(st.get(f"{a}.to_out.0.weight"), s_o))
+        put(f"{name}.qkv")
+        put(f"{name}.out")
         w.tensor(f"{name}.q_norm", st.get(f"{a}.norm_q.weight")[perm[:hd]].astype(np.float32), "f32")
         w.tensor(f"{name}.k_norm", st.get(f"{a}.norm_k.weight")[perm[:hd]].astype(np.float32), "f32")
-        gate = st.get(f"{prefix}.feed_forward.w1.weight")
-        value = st.get(f"{prefix}.feed_forward.w3.weight")
-        put(f"{name}.fc1", "fc1", rotate_in(np.concatenate([value * s_f[:, None], gate]), s_mlp))
-        put(f"{name}.fc2", "fc2", rotate_in(st.get(f"{prefix}.feed_forward.w2.weight"), s_f))
-        n1, n2 = st.get(f"{prefix}.attention_norm1.weight"), st.get(f"{prefix}.attention_norm2.weight")
-        m1, m2 = st.get(f"{prefix}.ffn_norm1.weight"), st.get(f"{prefix}.ffn_norm2.weight")
+        put(f"{name}.fc1")
+        put(f"{name}.fc2")
+        norms = np.stack([st.get(f"{prefix}.{k}.weight") for k in ("attention_norm1", "attention_norm2",
+                                                                      "ffn_norm1", "ffn_norm2")]).astype(np.float32)
         if modulated:
             aw, ab = st.get(f"{prefix}.adaLN_modulation.0.weight"), st.get(f"{prefix}.adaLN_modulation.0.bias")
             mod = (temb @ aw.T + ab).reshape(len(t_steps), 4, D)  # scale_msa, gate_msa, scale_mlp, gate_mlp
-            sc_a, g_a, sc_m, g_m = (mod[:, i] for i in range(4))
-            g_a, g_m = np.tanh(g_a), np.tanh(g_m)
-        else:
-            sc_a = sc_m = np.zeros((1, D), np.float32)
-            g_a = g_m = np.ones((1, D), np.float32)
-        n = sc_a.shape[0]
-        pre_a = np.zeros((n, 2, D), np.float32)
-        pre_m = np.zeros((n, 2, D), np.float32)
-        pre_a[:, 0] = n1 * (1.0 + sc_a) * s_in   # norm_mod_q8: rmsnorm(x) * scale' + shift (shift 0)
-        pre_m[:, 0] = m1 * (1.0 + sc_m) * s_mlp
-        w.tensor(f"{name}.pre_attn", pre_a, "f32")
-        w.tensor(f"{name}.pre_mlp", pre_m, "f32")
-        w.tensor(f"{name}.post_attn", (g_a * n2).astype(np.float32), "f32")  # x += post * rmsnorm(y)
-        w.tensor(f"{name}.post_mlp", (g_m * m2).astype(np.float32), "f32")
+        else:  # scale 0, gates tanh^-1(1): the tables below then hold the norm weights alone
+            mod = np.zeros((1, 4, D), np.float32)
+            mod[:, 1] = mod[:, 3] = np.inf
+        tabs = block_tables(mod, norms, plans[f"{name}.qkv"].s_in, plans[f"{name}.fc1"].s_in)
+        for k in ("pre_attn", "pre_mlp", "post_attn", "post_mlp"):
+            w.tensor(f"{name}.{k}", tabs[k], "f32")
+        if modulated:  # what a LoRA adapter of the AdaLN projection needs to recompute the tables
+            w.tensor(f"{name}.mod", mod.astype(np.float32), "f32", host_only=True)
+            w.tensor(f"{name}.norms", norms, "f32", host_only=True)
 
     for i in range(R):
         block(f"context_refiner.{i}", f"cap_refiner.{i}", 2000 + i, False)
@@ -197,6 +245,48 @@ class ZImageDiT:
         self.zeros = gpu.upload(np.zeros(self.D, np.float32))
         self.patch_dim = self.x_embed_w.shape[1]
         self._bufs = None
+        self.plans, self.aliases = model_plans(c, wf.meta.get("seed", 1))
+        self.by_name = {}
+        for group, blocks in (("blocks", self.blocks), ("x_refiner", self.x_refiner),
+                              ("cap_refiner", self.cap_refiner)):
+            for i, blk in enumerate(blocks):
+                self.by_name[f"{group}.{i}"] = blk
+        self._tables = {}  # tables a LoRA replaced: block -> the converted ones
+
+    def set_loras(self, adapters):
+        """LoRA adapters [(layers from h3metal.lora.read, strength)] for the next steps ([] removes them).
+
+        Linear layers get low-rank terms (h3metal/ops.py, low_rank); adapters of the AdaLN projections move the
+        precomputed modulation, so the affected blocks' tables are recomputed (block_tables)."""
+        for name, tabs in self._tables.items():
+            self.by_name[name].update(tabs)
+        self._tables = {}
+        for blk in self.by_name.values():
+            for k in ("qkv", "out", "fc1", "fc2"):
+                blk[k].low = None
+        if not adapters:
+            return
+        ts = lora.terms(adapters, self.plans, self.aliases, model="Z-Image")
+        scratch = ops.Scratch(self.gpu)
+        temb = None
+        for name, terms in ts.items():
+            block, which = name.rsplit(".", 1)
+            A, B = lora.stack(terms)
+            blk = self.by_name[block]
+            if which != "mod":
+                blk[which].low = ops.low_rank(self.gpu, A, B, scratch)
+                continue
+            if f"{block}.mod" not in self.wf:
+                raise lora.LoraError("this LoRA adapts Z-Image's modulation, which needs tables that h3metal 0.4 adds "
+                                     "when converting: run `h3metal convert` on the Z-Image checkpoint again")
+            if temb is None:
+                temb = self.wf.host("temb").astype(np.float64)
+            mod = self.wf.host(f"{block}.mod").astype(np.float64)
+            mod = (mod + ((temb @ A.T.astype(np.float64)) @ B.T.astype(np.float64)).reshape(mod.shape))
+            tabs = block_tables(mod.astype(np.float32), self.wf.host(f"{block}.norms"),
+                                self.plans[f"{block}.qkv"].s_in, self.plans[f"{block}.fc1"].s_in)
+            self._tables[block] = {k: blk[k] for k in tabs}
+            blk.update({k: self.gpu.upload(np.ascontiguousarray(v)) for k, v in tabs.items()})
 
     def _alloc(self, S: int):
         g, D, H, hd, F = self.gpu, self.D, self.H, self.hd, self.F
@@ -418,6 +508,7 @@ class ZImagePipeline:
         self.tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
         self._te_cache: dict[str, np.ndarray] = {}
         self._dit = self._dit_wf = None
+        self.loras = lora.Loaded()
 
     def tokenize(self, prompt: str) -> list[int]:
         return self.tokenizer.encode(chat_prompt(prompt), add_special_tokens=False).ids[:MAX_TOKENS]
@@ -461,20 +552,26 @@ class ZImagePipeline:
             self._dit_wf.close()
             self._dit_wf = None
 
-    def generate(self, prompt: str, width: int = 1024, height: int = 1024, seed: int = 0, progress=None, **_):
-        """-> (uint8 image [height][width][3], Timing)."""
+    def generate(self, prompt: str, width: int = 1024, height: int = 1024, seed: int = 0, progress=None,
+                 loras=(), **_):
+        """-> (uint8 image [height][width][3], Timing). loras: [(path to a LoRA file, strength)]."""
         from .flux_vae import FluxVAEDecoder
         from .pipeline import Timing, noise
         if width % 16 or height % 16:
             raise ValueError("Z-Image needs width and height that are multiples of 16")
         timing = Timing()
+        adapters = self.loras.read(loras)  # before the work: a file that cannot be applied stops here
         emb = self.encode_prompt(prompt, timing)
         t = time.time()
         if self._dit is None:
             self._dit_wf = WeightFile(self.gpu, self.paths["dit"])
             self._dit = ZImageDiT(self.gpu, self._dit_wf)
+            self.loras.applied = None
             timing.add("load", time.time() - t)
         dit = self._dit
+        t = time.time()
+        if self.loras.apply(dit, adapters) and adapters:
+            timing.add("lora", time.time() - t)
         h, w = height // 8, width // 8
         t = time.time()
         dit.prepare(emb.shape[0], h, w)

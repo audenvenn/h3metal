@@ -118,3 +118,30 @@ padding rows that attend to the prompt only. Four lessons for the next model:
   rounding, the official bfloat16 one included, and h3metal's are as close
   to float32 as the official ones (docs/flux2.md). Raising the precision
   would have cost 4.5 GB and changed nothing.
+
+## What LoRA adapters added
+
+Adapters (`h3metal/lora.py`, [docs/lora.md](lora.md)) needed one engine
+change. A product can carry a low-rank term (`ops.LowRank`), which runs as a
+narrow product of the same activations plus a short second product added in
+the main product's epilogue. Three lessons:
+
+- **Check a hardware property, then build on it.** The epilogue adds the
+  low-rank product's destination registers to the main product's element by
+  element. That is only right if an int8 product and a half-precision one of
+  the same tile shape lay out their destinations the same way. Nothing
+  documents that, so it was measured first on every tile shape in use,
+  grouped and not. `tests/test_gemm.py` keeps checking it, so a GPU that
+  differs fails a test instead of drawing wrong images.
+- **Describe a transform once.** The converters permute, sign-flip, fuse,
+  split and rotate the original layers. An adapter has to go through exactly
+  the same transforms. Writing them a second time for the adapters would
+  have made two copies to keep in step. Instead both read the same plans
+  (`model_plans`), and a CPU test checks that an adapter's terms equal the
+  plans' transform of its dense update. Rebuilding the converters on the
+  plans changed no converted tensor, byte for byte.
+- **Keep what a precomputed table was made from.** Z-Image's modulation
+  tables fold norm weights and rotation signs into the AdaLN output. An
+  adapter of the AdaLN projection moves that output, and the tables cannot
+  be unfolded. The converter now keeps the output and the norm weights
+  (16 MB) next to the tables.

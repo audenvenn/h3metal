@@ -27,6 +27,11 @@ On a Mac mini with an M6 (12-core GPU, 24 GB):
   [h3-image-mlx](https://github.com/Anionex/h3-image-mlx) on the same
   machine (4.5 times at 1024 x 1024).
 
+Z-Image-Turbo and FLUX.2 [klein] take LoRA adapters: style adapters and
+FLUX.2's edit adapters (outpainting, object removal, ...). They are applied
+exactly, inside the int8 products, at a few percent of the time
+([docs/lora.md](docs/lora.md)).
+
 See [Performance](#performance) and [Image quality](#image-quality).
 
 ## Quick start
@@ -38,7 +43,7 @@ and M6-class GPUs; it is developed and measured on an M6. The release's
 wheel holds the compiled GPU runtime, so nothing needs building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.3.0/h3metal-0.3.0-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.4.0/h3metal-0.4.0-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, 15 GB (--source modelscope also works)
 h3metal convert ~/.h3metal/flux2-klein-4b  # int8, into ~/.h3metal/flux2-klein, about a minute
@@ -111,9 +116,23 @@ h3metal serve --open    # http://127.0.0.1:7860, this Mac only
 ```
 
 It offers every converted model, reference images for edits, sizes and
-seeds, and the images made so far. The model stays loaded between images, so
-only the first one pays for mapping its weights. Images go to
-`~/.h3metal/outputs` with the same PNG metadata as `generate`.
+seeds, LoRA adapters, and the images made so far. The model stays loaded
+between images, so only the first one pays for mapping its weights. Images go
+to `~/.h3metal/outputs` with the same PNG metadata as `generate`.
+
+LoRA adapters work with Z-Image-Turbo and FLUX.2 [klein]. Pass
+`--lora FILE[:STRENGTH]`, repeated for several; the web page offers the files
+in `~/.h3metal/loras`:
+
+```sh
+h3metal generate --model zimage -p "Pixel art style. A red fox in fresh snow" --lora pixel_art.safetensors
+```
+
+h3metal reads diffusers', kohya's and the original checkpoints' layouts. It
+applies an adapter exactly, as a low-rank term inside each layer's own
+product rather than merged into the int8 weights. That costs a few percent
+of the denoising time. [docs/lora.md](docs/lora.md) has the details and the
+measurements.
 
 From Python:
 

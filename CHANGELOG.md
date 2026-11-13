@@ -6,13 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-13
+
 ### Added
 
+- LoRA adapters for Z-Image-Turbo and FLUX.2 [klein] (`--lora FILE[:STRENGTH]`,
+  repeatable; the web page offers the files in `~/.h3metal/loras`; `loras=`
+  in Python).
+  - Layouts: diffusers/PEFT, kohya and the original checkpoints' names.
+  - Each adapter is applied exactly, as a low-rank term inside each layer's
+    product (`kernels/gemm.metal`, `LORA`): no second rounding of the int8
+    weights, any strength, several adapters at once.
+  - Files h3metal cannot apply exactly (DoRA, LoKr, text-encoder adapters,
+    another model's) are refused, never applied in part. See docs/lora.md.
 - Each release carries a wheel with the compiled GPU runtime: `pip install`
   of it needs no compiler. The README installs it.
 
 ### Changed
 
+- Z-Image conversions keep the modulation's AdaLN output and norm weights
+  (16 MB), which adapters of the modulation need. Earlier conversions still
+  work, and adapters without modulation layers work on them.
+- The converters of both models build their weights from shared plans, which
+  the adapters use too. The converted tensors are unchanged, byte for byte.
 - The GPU runtime targets macOS 26 explicitly, whatever macOS builds it.
 - `h3metal --help` names the three models.
 
@@ -129,7 +145,8 @@ All notable changes to this project are documented here. The format follows
   check of a converted text encoder, and benchmarks of every kernel, of
   image quality and of end-to-end speed against another implementation.
 
-[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.4.0
 [0.3.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.3.0
 [0.2.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.2.0
 [0.1.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.1.0

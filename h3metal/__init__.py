@@ -5,7 +5,7 @@
     image, timing = pipe.generate("A red fox in fresh snow", 2048, 2048, seed=0)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 def __getattr__(name):

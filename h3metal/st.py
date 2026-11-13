@@ -97,3 +97,20 @@ class Sharded:
 
     def shape(self, name: str) -> tuple:
         return self._file(name).shape(name)
+
+
+def save(path: str, tensors: dict):
+    """Writes NumPy arrays as a safetensors file (float32, float16, int8, uint8, int32, int64, float64)."""
+    names = {np.dtype(v): k for k, (v, _) in _DT.items() if k != "BF16"}
+    hdr, off, blobs = {}, 0, []
+    for name, arr in tensors.items():
+        a = np.ascontiguousarray(arr)
+        hdr[name] = {"dtype": names[a.dtype], "shape": list(a.shape), "data_offsets": [off, off + a.nbytes]}
+        blobs.append(a.tobytes())
+        off += a.nbytes
+    h = json.dumps(hdr).encode()
+    h += b" " * (-len(h) % 8)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(h)) + h)
+        for b in blobs:
+            f.write(b)

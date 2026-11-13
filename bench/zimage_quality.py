@@ -35,9 +35,14 @@ ap = argparse.ArgumentParser()
 ap.add_argument("model")
 ap.add_argument("ref")
 ap.add_argument("--save")
+ap.add_argument("--ref-embeds", action="store_true", help="feed the reference's text embeddings (isolates the "
+                "transformer, its adapters and the decoder from the text encoder)")
 a = ap.parse_args()
 r = np.load(a.ref)
 prompt, seed, size = str(r["prompt"]), int(r["seed"]), int(r["size"])
+loras = [(str(r["lora"]), float(r["lora_scale"]))] if "lora" in r else []
+if loras:
+    print(f"LoRA {os.path.basename(loras[0][0])} at {loras[0][1]} (the reference run's)")
 os.environ["H3METAL_CACHE"] = "off"
 pipe = ZImagePipeline(a.model, log=lambda *x: None)
 
@@ -49,7 +54,9 @@ dec = FluxVAEDecoder(pipe.gpu, WeightFile(pipe.gpu, pipe.paths["vae"]))
 img_dec = np.rint((dec.decode(r["final"]) / 2 + 0.5).clip(0, 1) * 255).astype(np.uint8)
 print(f"decoder on the reference latents: PSNR {psnr(img_dec, ref_img):.1f} dB")
 
-img, timing = pipe.generate(prompt, size, size, seed=seed)
+if a.ref_embeds:
+    pipe.encode_prompt = lambda p, t: r["cap"]
+img, timing = pipe.generate(prompt, size, size, seed=seed, loras=loras)
 dit = pipe._dit
 h = w = size // 8
 dit.prepare(r["cap"].shape[0], h, w)

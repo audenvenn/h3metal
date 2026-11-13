@@ -19,8 +19,16 @@
 //   0  C[m][n] = OUT_T(v + bias[n])
 //   1  X[m][n] += gate[type[m]][n] * (v + bias[n])     X float: the residual stream; one gate row per row type
 //
+// Low-rank term (LORA 1), added to v before the epilogue, for LoRA adapters:
+//   v[m][n] += sum_{k0 <= j < k1} T[m][j] * B[n][j]      T [M][R] half, B [N][R] half
+// T is the adapter's input-side product (a separate, narrow product of A with the adapter's A matrices) and B
+// its output side. [k0, k1) is the rank range that touches the threadgroup's columns, from the table lr:
+// lr[0] T's row stride, lr[1] B's row stride, then (k0, k1) per column tile. It runs on the matrix units as a
+// second product of the same tile shape, whose destination elements line up with the main product's
+// (checked by tests/test_gemm.py on every tile shape in use).
+//
 // A, C and X are padded to a whole number of TM-row tiles; N is a multiple of TN.
-// Specialization: TM, TN, NSG (SIMD-groups per threadgroup), G, OUT_T, HAS_BIAS.
+// Specialization: TM, TN, NSG (SIMD-groups per threadgroup), G, OUT_T, HAS_BIAS, LORA.
 
 #include <metal_stdlib>
 #include <metal_tensor>
@@ -60,6 +68,9 @@ using namespace mpp::tensor_ops;
 #endif
 #ifndef FAST_LAYOUT
 #define FAST_LAYOUT 0
+#endif
+#ifndef LORA
+#define LORA 0
 #endif
 #ifndef RELAXED
 #define RELAXED true
@@ -112,6 +123,9 @@ kernel void gemm(device A_T *a [[buffer(0)]],
                  device const uchar *rtype [[buffer(6)]],
                  device const float *gate [[buffer(7)]],
                  constant GemmParams &p [[buffer(8)]],
+                 device half *lt [[buffer(9)]],
+                 device half *lb [[buffer(10)]],
+                 device const int *lr [[buffer(11)]],
                  uint3 tgid [[threadgroup_position_in_grid]],
                  uint3 tgs [[threadgroups_per_grid]])
 {
@@ -194,6 +208,26 @@ kernel void gemm(device A_T *a [[buffer(0)]],
   op.run(tA, tW, acc);
 #endif
 
+#if LORA
+  const int k0 = lr[2 + 2 * (n0 / TN)], k1 = lr[3 + 2 * (n0 / TN)];
+  constexpr auto ldesc = matmul2d_descriptor(TM, TN, static_cast<int>(dynamic_extent), false, true, RELAXED,
+                                             matmul2d_descriptor::mode::multiply);
+  matmul2d<ldesc, execution_simdgroups<NSG>> lop;
+  tensor<device half, dextents<int, 2>, tensor_inline> LT(lt, dextents<int, 2>(k1, p.M), array<int, 2>{1, lr[0]});
+  tensor<device half, dextents<int, 2>, tensor_inline> LB(lb, dextents<int, 2>(k1, p.N), array<int, 2>{1, lr[1]});
+  auto tLT = LT.slice(k0, m0);
+  auto tLB = LB.slice(k0, n0);
+  auto low = lop.get_destination_cooperative_tensor<decltype(tLT), decltype(tLB), float>();
+  if (k1 > k0) {
+    lop.run(tLT, tLB, low);
+  } else {
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < low.get_capacity(); ++i) {
+      if (low.is_valid_element(i)) low[i] = 0.0f;
+    }
+  }
+#endif
+
 #pragma clang loop unroll(full)
   for (ushort i = 0; i < acc.get_capacity(); ++i) {
     if (!acc.is_valid_element(i)) continue;
@@ -213,6 +247,9 @@ kernel void gemm(device A_T *a [[buffer(0)]],
 #endif
 #if HAS_BIAS
     v += bias[n];
+#endif
+#if LORA
+    v += low[i];
 #endif
 #if EPI == 0
     ((device OUT_T *)out)[size_t(m) * p.c_stride + n] = OUT_T(v);
