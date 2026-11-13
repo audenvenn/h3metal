@@ -284,6 +284,10 @@ def cmd_info(a):
     _check_device(g.device)
     from .flux2 import flux2_name, is_flux2_dir
     from .zimage import is_zimage_dir
+    if a.model is None and not any(os.path.exists(os.path.join(d, "dit.h3m"))
+                                   for d in (DEFAULT_MODEL, ZIMAGE_MODEL, FLUX2_MODEL, FLUX2_9B_MODEL)):
+        print("no model yet: `h3metal download --model flux2-klein-4b` (or z-image-turbo) fetches one ready to run")
+        return
     a.model = _model_dir(a.model)
     other = is_zimage_dir(a.model) or is_flux2_dir(a.model)
     name = "Z-Image-Turbo" if is_zimage_dir(a.model) else flux2_name(a.model) if is_flux2_dir(a.model) else \
@@ -300,8 +304,10 @@ def cmd_info(a):
 
 
 def main(argv=None):
+    from . import __version__
     ap = argparse.ArgumentParser(prog="h3metal", description="Image generation on Apple Silicon's GPU matrix units: "
                                  "FLUX.2 [klein], Z-Image-Turbo and MiniMax-H3-Image.")
+    ap.add_argument("--version", action="version", version=f"h3metal {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate", help="text to image, or an edit with --image")
     g.add_argument("-p", "--prompt", required=True)

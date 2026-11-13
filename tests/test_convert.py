@@ -148,6 +148,16 @@ def test_cli_sizes_and_device_check():
     assert _model_dir(None) in (DEFAULT_MODEL, ZIMAGE_MODEL, FLUX2_MODEL, FLUX2_9B_MODEL)
     from h3metal.flux2 import variant_name
     assert variant_name(3072) == "FLUX.2 [klein] 4B" and variant_name(4096) == "FLUX.2 [klein] 9B"
+    import contextlib
+    import io
+    from h3metal import __version__, cli
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        try:
+            cli.main(["--version"])
+        except SystemExit as e:
+            assert e.code == 0, e.code
+    assert out.getvalue().strip() == f"h3metal {__version__}", out.getvalue()
     from h3metal.cli import auto_format
     assert [auto_format(g * 2**30) for g in (16, 24, 32, 64)] == ["q4", "mix", "q8", "q8"]
 

@@ -228,8 +228,8 @@ def make_handler(studio: Studio):
 def serve(models: dict[str, str], default: str | None, host: str = "127.0.0.1", port: int = 7860,
           open_browser: bool = False, lora_dir: str = LORA_DIR):
     if not models:
-        raise SystemExit("no converted model: `h3metal download --model z-image-turbo` (or flux2-klein-4b, "
-                         "minimax-h3) and `h3metal convert` first")
+        raise SystemExit("no model yet: `h3metal download --model flux2-klein-4b` (or z-image-turbo) fetches one "
+                         "ready to run")
     studio = Studio(models, default, os.path.expanduser(lora_dir))
     httpd = ThreadingHTTPServer((host, port), make_handler(studio))
     url = f"http://{host}:{port}/"
