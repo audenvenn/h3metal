@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-13
+
 ### Added
 
 - Z-Image-Turbo (Tongyi-MAI, Apache-2.0), text to image: `h3metal download --model z-image-turbo`,
@@ -72,5 +74,6 @@ All notable changes to this project are documented here. The format follows
   check of a converted text encoder, and benchmarks of every kernel, of
   image quality and of end-to-end speed against another implementation.
 
-[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.2.0
 [0.1.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.1.0
