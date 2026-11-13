@@ -22,6 +22,7 @@ On a Mac mini with an M6 (12-core GPU, 24 GB):
   out nearly the same picture as the official pipeline.
 - **FLUX.2 [klein] 4B:** a 1024 x 1024 image takes 7.4 s from a new prompt,
   2.3 times faster than mflux.
+- **FLUX.2 [klein] 9B:** 14.1 s, also 2.3 times faster than mflux.
 - **MiniMax-H3-Image:** a 2048 x 2048 image takes 41 s (46 s with a new
   prompt) and a 4096 x 4096 image 236 s, 2.8 and 1.9 times faster than
   [h3-image-mlx](https://github.com/Anionex/h3-image-mlx) on the same
@@ -38,9 +39,15 @@ See [Performance](#performance) and [Image quality](#image-quality).
 
 Needs a Mac with Apple silicon and Metal 4 (macOS 26 or later) and Python
 3.10+. The `python3` that comes with macOS is 3.9: use a newer one, from
-python.org, Homebrew or uv. The matrix units h3metal is built for are in M5-
-and M6-class GPUs; it is developed and measured on an M6. The release's
-wheel holds the compiled GPU runtime, so nothing needs building:
+python.org, Homebrew or uv.
+
+h3metal is built for the matrix units of M5- and M6-class GPUs, and it is
+developed and measured on an M6. Earlier Apple GPUs (M1-M4) have no matrix
+units. There h3metal warns, and it may run slowly or not at all: it is not
+tested on them.
+
+The release's wheel holds the compiled GPU runtime, so nothing needs
+building:
 
 ```sh
 pip install https://github.com/audenvenn/h3metal/releases/download/v0.5.1/h3metal-0.5.1-py3-none-macosx_26_0_arm64.whl
@@ -71,8 +78,9 @@ h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
 h3metal generate -p "Put <Picture 1> on a beach at dusk" -i photo.jpg -o edit.png
 ```
 
-`generate` uses MiniMax-H3-Image once it is converted, Z-Image-Turbo
-otherwise; `--model zimage` or `--model minimax-h3` picks one. Each model
+Without `--model`, `generate` uses the first of MiniMax-H3-Image,
+Z-Image-Turbo, FLUX.2 [klein] 4B and 9B that is on the Mac. `--model
+minimax-h3`, `zimage`, `flux2` or `flux2-9b` picks one. Each model
 comes with its own license: MiniMax-H3-Image's limits where and how it may
 be used, so read [The models' licenses](#the-models-licenses) before
 downloading it. `h3metal download --source modelscope` fetches from
