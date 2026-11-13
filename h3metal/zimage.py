@@ -332,6 +332,8 @@ class ZImageDiT:
         cos, sin = b["cos"].row(r0, S), b["sin"].row(r0, S)
         ops.qk_norm_rope(g, qkv, blk["q_norm"], blk["k_norm"], cos, sin, Qb, Kb, b["V"], M=S, Hq=H, Hk=H, Hv=H,
                          hd=hd, out_rows=Sp, rot=hd, eps=eps, q_scale=b["qs"], k_scale=b["ks"])
+        # No query/key rotation here (unlike MiniMax-H3-Image and FLUX.2): against diffusers it made one step's error
+        # worse, 3.9% to 6.6% (docs/design.md).
         ops.attention(g, Qb, Kb, b["V"], b["o"], Lq=S, L=S, H=H, KVH=H, D=hd, q_rows=Sp, k_rows=Sp,
                       scale=hd ** -0.5, q_scale=b["qs"], k_scale=b["ks"], **self.attn_cfg_q8)
         ops.rot_q8(g, b["o"], a8.view((Sp, D)), sa, S, D)

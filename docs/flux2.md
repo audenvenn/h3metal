@@ -88,8 +88,13 @@ prompt and noise, at 1024 x 1024:
 | Part | Result |
 |---|---|
 | Chat template and the 512 tokens | identical |
-| Transformer and decoder, fed the reference's text embeddings | PSNR 38.5 dB, SSIM 0.995 |
-| The whole pipeline | PSNR 24.2 dB, SSIM 0.933 |
+| Transformer, one step from the reference's input and embeddings | 3.9% (4.4% before 0.6.1) |
+| Transformer and decoder, fed the reference's text embeddings | PSNR 39.0 dB, SSIM 0.994 (38.5 dB, 0.995 before 0.6.1) |
+| The whole pipeline | PSNR 23.9 dB, SSIM 0.932 (24.2 dB, 0.933 before 0.6.1) |
+
+Since 0.6.1 the queries and keys are rotated before their int8 rounding (docs/design.md); the numbers in
+parentheses are without it. The whole pipeline's PSNR follows the fragile padding rows described next more
+than the transformer.
 
 The gap between the last two rows is the prompt's padding. 482 of the 512
 caption rows are padding tokens, and their hidden states are numerically
@@ -97,7 +102,7 @@ fragile: the official pipeline in bfloat16 moves them 12-13% away from the
 same text encoder in float32 by layer 18. These rows still steer the image.
 A float32 text encoder on the CPU makes the comparison; every image below
 comes from h3metal's transformer and decoder (which reproduce diffusers' to
-38.5 dB) and differs only in its text embeddings:
+38.5 dB; measured before 0.6.1) and differs only in its text embeddings:
 
 | Text embeddings | Prompt rows vs float32 | Padding rows vs float32 (layers 9 / 18 / 27) | Image vs the float32 embeddings' image |
 |---|---:|---:|---|

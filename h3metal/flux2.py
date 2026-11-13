@@ -86,6 +86,11 @@ def _signs(seed: int, layer: int, role: int, n: int) -> np.ndarray:
     return random_signs(n, seed * 1_000_003 + layer * 101 + role)
 
 
+# Queries and keys rotated before their int8 rounding (ops.qk_norm_rope): against diffusers, one step's error goes
+# from 4.4% to 3.9% and the image from the same embeddings from 38.5 to 39.0 dB (docs/flux2.md). H3METAL_QKROT=0
+# turns it off.
+QK_ROT = os.environ.get("H3METAL_QKROT", "1") != "0"
+
 HOST = {"t_lin1": "time_guidance_embed.timestep_embedder.linear_1",
         "t_lin2": "time_guidance_embed.timestep_embedder.linear_2",
         "mod_img": "double_stream_modulation_img.linear", "mod_txt": "double_stream_modulation_txt.linear",
@@ -417,7 +422,8 @@ class Flux2DiT:
                          b["V"].view(b["V"].shape, offset_elems=r0 * hd), M=M, Hq=self.H, Hk=self.H, Hv=self.H, hd=hd,
                          out_rows=Sp, rot=hd, eps=self.eps, in_stride=in_stride,
                          q_scale=b["qs"].view(b["qs"].shape, offset_elems=r0),
-                         k_scale=b["ks"].view(b["ks"].shape, offset_elems=r0))
+                         k_scale=b["ks"].view(b["ks"].shape, offset_elems=r0),
+                         qk_rot=QK_ROT)
 
     def _double(self, b, i: int, blk):
         g, D, F, T, S, Sp = self.gpu, self.D, self.F, self.T, self.S, b["Sp"]

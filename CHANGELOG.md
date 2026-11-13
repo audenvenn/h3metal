@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-13
+
+### Changed
+
+- FLUX.2 [klein] rotates its queries and keys before their int8 rounding,
+  as MiniMax-H3-Image does since 0.6.0. Against diffusers, one step's error
+  goes from 4.4% to 3.9%, and the image from the reference's text
+  embeddings from 38.5 to 39.0 dB PSNR.
+- Z-Image-Turbo keeps the plain rounding: the rotation made one step's
+  error worse there, 3.9% to 6.6% (docs/design.md).
+- `H3METAL_QKROT=0` turns the rotation off, for comparisons.
+
 ## [0.6.0] - 2026-11-13
 
 ### Added

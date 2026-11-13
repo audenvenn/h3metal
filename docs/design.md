@@ -116,7 +116,8 @@ where attention is almost half of a block's time: 81% and 85% of the time
 the matrix units need for the two products at their measured peaks
 (37.5 ms and 0.56 s with half-precision scores and none of the changes).
 
-Queries and keys are rotated before their int8 rounding (MiniMax-H3-Image).
+Queries and keys are rotated before their int8 rounding (MiniMax-H3-Image,
+FLUX.2 [klein]).
 On the real weights a few channels dominate every query and key row: in the
 first block the rotary channels hold 89% of the keys' energy, and in the
 worst head the largest channel is 11 times the median one. One int8 scale per
@@ -138,8 +139,18 @@ first block's real queries, keys and values:
 - moving channel scale from keys to queries (SmoothQuant's migration) does
   not help.
 
-Z-Image-Turbo and FLUX.2 [klein] keep the plain rounding until their
-comparisons with diffusers are rerun.
+The other models were measured against their diffusers references
+(bench/flux2_quality.py, bench/zimage_quality.py, 1024 x 1024, seed 42):
+- **FLUX.2 [klein] 4B:** one step from the reference's input goes from 4.4%
+  to 3.9%, and the image from the reference's embeddings from 38.5 to
+  39.0 dB (SSIM 0.995 and 0.994). The rotation is on.
+- **Z-Image-Turbo:** one step goes from 3.9% to 6.6%, worse, although both
+  of its single images came out closer to the reference (31.3 to 31.5 dB,
+  35.3 to 36.6 dB from the reference's embeddings). One image is a weak
+  measure next to one step, so the rotation stays off. Its rotary embedding
+  covers all 128 channels (MiniMax-H3-Image's covers 96), and a row whose
+  energy is already spread can only lose by the rotation. That is a
+  plausible cause, not a verified one.
 
 P V in int8 does not pay on this GPU. With V in int8 (one scale per row)
 and each block of probabilities quantized per row against its largest
