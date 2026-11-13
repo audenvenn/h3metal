@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-13
+
+### Fixed
+
+- `h3metal download` retries the Hugging Face and ModelScope API calls that
+  fail on the way: connection resets, TLS errors, timeouts, 429 and 5xx
+  answers, with growing pauses. Before, the first failure stopped the
+  command. A missing repository or revision (401, 404) still answers at
+  once, which the fallback to the official checkpoints relies on. The files
+  themselves were already retried.
+
 ## [0.6.1] - 2026-11-13
 
 ### Changed

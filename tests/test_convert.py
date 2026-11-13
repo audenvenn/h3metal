@@ -160,6 +160,41 @@ def test_pdmd_lora_is_pinned():
             download.download_lora = orig
 
 
+def test_api_retries():
+    """The downloader's API calls ride out a few failed connections and server errors, but not a 404."""
+    import io
+    import ssl
+    import urllib.error
+    from h3metal import download
+    calls = []
+
+    def flaky(req, timeout):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            raise urllib.error.URLError(ssl.SSLEOFError(8, "EOF occurred in violation of protocol"))
+        if len(calls) == 2:
+            raise urllib.error.HTTPError(req.full_url, 503, "busy", {}, None)
+        return io.BytesIO(b'{"ok": 1}')
+
+    orig_open, orig_sleep = download.urllib.request.urlopen, download.time.sleep
+    download.urllib.request.urlopen, download.time.sleep = flaky, lambda s: None
+    try:
+        assert download._json("https://example.invalid/api") == {"ok": 1} and len(calls) == 3
+
+        def missing(req, timeout):
+            calls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 404, "not found", {}, None)
+        download.urllib.request.urlopen = missing
+        calls.clear()
+        try:
+            download._json("https://example.invalid/api")
+            raise AssertionError("a 404 must not be retried")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404 and len(calls) == 1
+    finally:
+        download.urllib.request.urlopen, download.time.sleep = orig_open, orig_sleep
+
+
 def test_dit_files():
     """Which transformer file runs how many steps: the six-step one by default, the few-step one for 2-4."""
     from h3metal.pipeline import dit_files
