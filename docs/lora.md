@@ -15,6 +15,16 @@ adapters. `h3metal serve` offers the `.safetensors` files in
 `~/.h3metal/loras`. From Python, pass `loras=[(path, strength)]` to the
 pipeline's `generate`.
 
+`h3metal download --lora OWNER/NAME` fetches an adapter's file from Hugging
+Face (or ModelScope with `--source modelscope`) into `~/.h3metal/loras`.
+Name the file as `OWNER/NAME/FILE` when the repository holds several. A
+bare name is then enough for `--lora`:
+
+```sh
+h3metal download --lora AI-ModelScope/pixel_art_style_lora_z_image_turbo --source modelscope
+h3metal generate --model zimage -p "Pixel art style. A lighthouse at dusk" --lora pixel_art_style_z_image_turbo
+```
+
 ## What it reads
 
 - **Layouts:** diffusers/PEFT (`lora_A`, `lora_B`, optional `alpha`), kohya

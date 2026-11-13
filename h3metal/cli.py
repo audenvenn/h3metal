@@ -10,19 +10,22 @@ import time
 DEFAULT_MODEL = os.environ.get("H3METAL_MODEL", os.path.expanduser("~/.h3metal/model"))
 ZIMAGE_MODEL = os.path.expanduser("~/.h3metal/zimage")  # converted Z-Image-Turbo, by default
 FLUX2_MODEL = os.path.expanduser("~/.h3metal/flux2-klein")  # converted FLUX.2 [klein] 4B, by default
+FLUX2_9B_MODEL = os.path.expanduser("~/.h3metal/flux2-klein-9b-h3m")  # converted FLUX.2 [klein] 9B
 MODEL_NAMES = {"zimage": ZIMAGE_MODEL, "z-image": ZIMAGE_MODEL, "z-image-turbo": ZIMAGE_MODEL,
                "flux2": FLUX2_MODEL, "flux2-klein": FLUX2_MODEL, "flux2-klein-4b": FLUX2_MODEL, "klein": FLUX2_MODEL,
+               "flux2-9b": FLUX2_9B_MODEL, "flux2-klein-9b": FLUX2_9B_MODEL, "klein-9b": FLUX2_9B_MODEL,
                "minimax-h3": DEFAULT_MODEL, "h3": DEFAULT_MODEL}
 
 
 def _model_dir(name: str | None) -> str:
     """--model: a converted model's directory, or one of the names in MODEL_NAMES. Without it, the first converted
-    of MiniMax-H3-Image (or H3METAL_MODEL if set), Z-Image-Turbo and FLUX.2 [klein]: the model the user has."""
+    of MiniMax-H3-Image (or H3METAL_MODEL if set), Z-Image-Turbo, FLUX.2 [klein] 4B and 9B: the model the user
+    has."""
     if name:
         return MODEL_NAMES.get(name.lower(), os.path.expanduser(name))
     if "H3METAL_MODEL" in os.environ:
         return DEFAULT_MODEL
-    for d in (DEFAULT_MODEL, ZIMAGE_MODEL, FLUX2_MODEL):
+    for d in (DEFAULT_MODEL, ZIMAGE_MODEL, FLUX2_MODEL, FLUX2_9B_MODEL):
         if os.path.exists(os.path.join(d, "dit.h3m")):
             return d
     return DEFAULT_MODEL
@@ -168,13 +171,16 @@ def auto_format(memory_bytes: int | None = None) -> str:
 
 def cmd_convert(a):
     from .convert import convert_dit
-    from .flux2 import convert_flux2, is_flux2_checkpoint
+    from .flux2 import checkpoint_name, convert_flux2, is_flux2_checkpoint
     from .zimage import convert_zimage, is_zimage_checkpoint
     if is_flux2_checkpoint(a.src):
         dit = "q8" if a.dit == "auto" else FORMAT_ALIASES.get(a.dit, a.dit)  # 3.9 GB in int8
-        out = _model_dir(a.out) if a.out else FLUX2_MODEL
+        nine = checkpoint_name(a.src).endswith("9B")
+        default = FLUX2_9B_MODEL if nine else FLUX2_MODEL
+        out = _model_dir(a.out) if a.out else default
         convert_flux2(a.src, out, dit=dit, te=a.te, parts=a.only.split(",") if a.only else None)
-        print(f"next: h3metal generate --model {'flux2' if out == FLUX2_MODEL else out} -p \"...\"")
+        alias = "flux2-9b" if nine else "flux2"
+        print(f"next: h3metal generate --model {alias if out == default else out} -p \"...\"")
         return
     if is_zimage_checkpoint(a.src):
         # Z-Image's 6 B transformer is 6.2 GB in int8, which fits every Mac h3metal runs on.
@@ -213,7 +219,15 @@ def cmd_convert(a):
 
 
 def cmd_download(a):
-    from .download import download
+    from .download import OTHER, download, download_lora
+    if a.lora:
+        path = download_lora(a.lora, a.source)
+        print(f"next: h3metal generate ... --lora {os.path.splitext(os.path.basename(path))[0]}")
+        return
+    terms = OTHER.get(a.model, {}).get("license")
+    if terms and not a.accept_license:
+        sys.exit(f"{a.model} is licensed under the {terms}. Read it, and pass --accept-license to download the "
+                 "weights under it.")
     if a.dest is None:
         a.dest = os.path.expanduser("~/.h3metal/checkpoint" if a.model == "minimax-h3" else f"~/.h3metal/{a.model}")
     if not download(a.dest, a.source, a.jobs, model=a.model):
@@ -230,15 +244,15 @@ def _check_device(device: str):
 
 def cmd_serve(a):
     from .serve import serve
-    names = {"MiniMax-H3-Image": DEFAULT_MODEL, "Z-Image-Turbo": ZIMAGE_MODEL, "FLUX.2 [klein] 4B": FLUX2_MODEL}
+    from .flux2 import flux2_name, is_flux2_dir
+    from .zimage import is_zimage_dir
+    names = {"MiniMax-H3-Image": DEFAULT_MODEL, "Z-Image-Turbo": ZIMAGE_MODEL, "FLUX.2 [klein] 4B": FLUX2_MODEL,
+             "FLUX.2 [klein] 9B": FLUX2_9B_MODEL}
     models = {n: d for n, d in names.items() if os.path.exists(os.path.join(d, "dit.h3m"))}
     default = None
     if a.model:
-        from .flux2 import is_flux2_dir
-        from .zimage import is_zimage_dir
         d = _model_dir(a.model)
-        default = "Z-Image-Turbo" if is_zimage_dir(d) else "FLUX.2 [klein] 4B" if is_flux2_dir(d) else \
-            "MiniMax-H3-Image"
+        default = "Z-Image-Turbo" if is_zimage_dir(d) else flux2_name(d) if is_flux2_dir(d) else "MiniMax-H3-Image"
         models[default] = d
     serve(models, default, host=a.host, port=a.port, open_browser=a.open, lora_dir=a.loras)
 
@@ -249,11 +263,11 @@ def cmd_info(a):
     print(f"device: {g.device}; recommended working set {g.working_set / 1e9:.1f} GB; "
           f"max buffer {g.max_buffer / 1e9:.1f} GB")
     _check_device(g.device)
-    from .flux2 import Flux2Pipeline, is_flux2_dir
+    from .flux2 import flux2_name, is_flux2_dir
     from .zimage import is_zimage_dir
     a.model = _model_dir(a.model)
     other = is_zimage_dir(a.model) or is_flux2_dir(a.model)
-    name = "Z-Image-Turbo" if is_zimage_dir(a.model) else Flux2Pipeline.model_name if is_flux2_dir(a.model) else \
+    name = "Z-Image-Turbo" if is_zimage_dir(a.model) else flux2_name(a.model) if is_flux2_dir(a.model) else \
         "MiniMax-H3-Image"
     print(f"model: {name} ({a.model})")
     for k in ("te", "dit", "vae") + (() if other else ("vision",)):
@@ -282,12 +296,12 @@ def main(argv=None):
     g.add_argument("-i", "--image", action="append", help="reference image (repeat for several); makes it an edit")
     g.add_argument("--lora", action="append", metavar="FILE[:STRENGTH]",
                    help="a LoRA adapter (.safetensors) for Z-Image-Turbo or FLUX.2 [klein], at a strength "
-                        "(default 1); repeat for several")
+                        "(default 1); a bare name is looked up in ~/.h3metal/loras; repeat for several")
     g.add_argument("--min-area", type=int, default=2048 * 2048,
                    help="smallest canvas the image is generated on (default 2048*2048, as released); "
                         "1024 generates at the requested size")
     g.add_argument("--model", default=None,
-                   help="a converted model's directory, or flux2 / zimage / minimax-h3 for the default ones "
+                   help="a converted model's directory, or flux2 / flux2-9b / zimage / minimax-h3 for the default ones "
                    "(default: the first converted of MiniMax-H3-Image, Z-Image-Turbo, FLUX.2 [klein])")
     g.set_defaults(func=cmd_generate)
     c = sub.add_parser("convert", help="convert the official weights into h3metal's format")
@@ -303,10 +317,16 @@ def main(argv=None):
                    help="choose the transformer's codes with GPTQ on calibration runs (about an hour on an M6)")
     c.set_defaults(func=cmd_convert)
     d = sub.add_parser("download", help="fetch the official weights h3metal converts from (about 125 GB; "
-                       "33 GB for Z-Image-Turbo, 15 GB for FLUX.2 [klein] 4B)")
+                       "33 GB for Z-Image-Turbo, 15 GB for FLUX.2 [klein] 4B, 35 GB for 9B)")
     d.add_argument("dest", nargs="?", default=None,
                    help="default ~/.h3metal/checkpoint (~/.h3metal/<model> with --model)")
-    d.add_argument("--model", choices=["minimax-h3", "z-image-turbo", "flux2-klein-4b"], default="minimax-h3")
+    d.add_argument("--model", choices=["minimax-h3", "z-image-turbo", "flux2-klein-4b", "flux2-klein-9b"],
+                   default="minimax-h3")
+    d.add_argument("--lora", metavar="OWNER/NAME[/FILE]",
+                   help="fetch a LoRA adapter's .safetensors file into ~/.h3metal/loras instead (from --source)")
+    d.add_argument("--accept-license", action="store_true",
+                   help="accept a model's own license where it asks for that (FLUX.2 [klein] 9B: the FLUX "
+                        "Non-Commercial License)")
     d.add_argument("--source", choices=["huggingface", "modelscope"], default="huggingface")
     d.add_argument("-j", "--jobs", type=int, default=4)
     d.set_defaults(func=cmd_download)

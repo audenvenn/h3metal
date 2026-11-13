@@ -46,6 +46,43 @@ class Studio:
             return []
         return sorted(f for f in os.listdir(self.lora_dir) if f.endswith(".safetensors"))
 
+    def lora_models(self) -> list[dict]:
+        """The LoRA files with the models each fits (read from their headers; cached by modification time)."""
+        from .lora import fits, shapes
+        cache = getattr(self, "_fits", {})
+        out = []
+        for f in self.lora_files():
+            p = os.path.join(self.lora_dir, f)
+            try:
+                key = (f, os.stat(p).st_mtime_ns)
+            except OSError:
+                continue
+            if key not in cache:
+                sh = shapes(p)
+                cache[key] = [m for m in self.models if (pl := self._plans(m)) and fits(sh, *pl)]
+            out.append({"name": f, "models": cache[key]})
+        self._fits = cache
+        return out
+
+    def _plans(self, name: str):
+        """A converted model's layer plans and aliases (h3metal/lora.py), from its transformer's header."""
+        plans = getattr(self, "_plan_cache", {})
+        if name not in plans:
+            plans[name] = None
+            try:
+                from .weights import read_header
+                meta = read_header(os.path.join(self.models[name], "dit.h3m"))["meta"]
+                if meta.get("kind") == "zimage-dit":
+                    from .zimage import model_plans
+                    plans[name] = model_plans(meta["config"], meta.get("seed", 1))
+                elif meta.get("kind") == "flux2-dit":
+                    from .flux2 import model_plans
+                    plans[name] = model_plans(meta["config"], meta.get("seed", 1))
+            except (OSError, ValueError, KeyError):
+                pass
+            self._plan_cache = plans
+        return plans[name]
+
     def _loras(self, req: dict, name: str) -> list:
         """The request's adapters [(path, strength)]: files of the LoRA directory only, by name."""
         items = req.get("loras") or []
@@ -151,7 +188,7 @@ def make_handler(studio: Studio):
                 self._send(200, PAGE.encode(), "text/html; charset=utf-8")
             elif self.path == "/state":
                 self._json(200, {"models": list(studio.models), "default": studio.default,
-                                 "loras": studio.lora_files(), "progress": studio.progress})
+                                 "loras": studio.lora_models(), "progress": studio.progress})
             elif self.path == "/history":
                 self._json(200, studio.history())
             elif self.path.startswith("/outputs/"):
@@ -278,11 +315,21 @@ function syncRefs() { const ok = refAllowed(); $('files').disabled = !ok; $('ref
 async function init() {
   const s = await state();
   for (const m of s.models) { const o = document.createElement('option'); o.textContent = m; $('model').appendChild(o); }
-  for (const f of s.loras || []) { const o = document.createElement('option'); o.textContent = f; $('lora').appendChild(o); }
+  loras = s.loras || [];
   if (s.default) $('model').value = s.default;
-  syncRefs(); loadHistory();
+  syncRefs(); syncLoras(); loadHistory();
 }
-$('model').onchange = syncRefs;
+let loras = [];
+function syncLoras() {
+  const keep = $('lora').value, m = $('model').value;
+  $('lora').innerHTML = '<option value="">none</option>';
+  for (const l of loras) {
+    if (!l.models.includes(m)) continue;
+    const o = document.createElement('option'); o.textContent = l.name; $('lora').appendChild(o);
+  }
+  if ([...$('lora').options].some((o) => o.value === keep)) $('lora').value = keep;
+}
+$('model').onchange = () => { syncRefs(); syncLoras(); };
 $('rnd').onclick = () => { $('seed').value = Math.floor(Math.random() * 1e9); };
 $('files').onchange = async (e) => {
   refs = []; $('refs').innerHTML = '';

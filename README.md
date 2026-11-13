@@ -6,7 +6,7 @@
 Image generation on Apple silicon, with its own Metal engine for the matrix
 units of the M5/M6 GPU. It runs [Z-Image-Turbo](#z-image-turbo) (Tongyi-MAI,
 6 B, Apache-2.0), [FLUX.2 [klein] 4B](#flux2-klein) (Black Forest Labs,
-Apache-2.0) and
+Apache-2.0) and 9B (non-commercial), and
 [MiniMax-H3-Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image) (33 B,
 text-to-image and image editing). Their transformers run on int8 matrix
 products and attention at 73-80% of what the matrix units can do at their
@@ -43,7 +43,7 @@ and M6-class GPUs; it is developed and measured on an M6. The release's
 wheel holds the compiled GPU runtime, so nothing needs building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.4.0/h3metal-0.4.0-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.5.0/h3metal-0.5.0-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, 15 GB (--source modelscope also works)
 h3metal convert ~/.h3metal/flux2-klein-4b  # int8, into ~/.h3metal/flux2-klein, about a minute
@@ -125,7 +125,8 @@ LoRA adapters work with Z-Image-Turbo and FLUX.2 [klein]. Pass
 in `~/.h3metal/loras`:
 
 ```sh
-h3metal generate --model zimage -p "Pixel art style. A red fox in fresh snow" --lora pixel_art.safetensors
+h3metal download --lora AI-ModelScope/pixel_art_style_lora_z_image_turbo --source modelscope  # into ~/.h3metal/loras
+h3metal generate --model zimage -p "Pixel art style. A red fox in fresh snow" --lora pixel_art_style_z_image_turbo
 ```
 
 h3metal reads diffusers', kohya's and the original checkpoints' layouts. It
@@ -337,6 +338,21 @@ own 8-bit copy of the model, four steps, every run a fresh process
 
 A transformer step runs at 73% of the matrix units' floor.
 
+[FLUX.2 [klein] 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B),
+the larger klein, runs the same way. It is under the FLUX Non-Commercial
+License ([below](#the-models-licenses)):
+
+```sh
+h3metal download --model flux2-klein-9b --accept-license   # 35 GB
+h3metal convert ~/.h3metal/flux2-klein-9b                  # int8, 17 GB, into ~/.h3metal/flux2-klein-9b-h3m
+h3metal generate --model flux2-9b -p "A lighthouse on a rocky coast at dusk" -o lighthouse.png
+```
+
+On the Mac mini, 9B makes a 1024 x 1024 image in 14.1 s from a new prompt.
+mflux 0.24 with its own 8-bit copy takes 31.9 s on the same machine, so
+h3metal is 2.3 times faster; with the prompt seen before it is 12.4 s against
+31.8 s ([docs/flux2.md](docs/flux2.md#flux2-klein-9b)).
+
 With the same prompt, noise and text embeddings as diffusers'
 `Flux2KleinPipeline` in bfloat16, h3metal's transformer and decoder
 reproduce its image to 38.5 dB PSNR (SSIM 0.995). The whole pipeline lands
@@ -370,6 +386,22 @@ FLUX.2 [klein] 4B is licensed by Black Forest Labs under the
 [Apache License 2.0](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B).
 `h3metal download --model flux2-klein-4b` fetches it from Black Forest Labs'
 own repositories (or ModelScope's copy).
+
+FLUX.2 [klein] 9B is licensed by Black Forest Labs under the
+[FLUX Non-Commercial License v2.1](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md),
+together with BFL's [Acceptable Use Policy](https://bfl.ai/legal/usage-policy):
+
+- It allows non-commercial use only. BFL offers commercial licenses.
+- You must filter its outputs for unlawful or infringing content, or review
+  them, before you share them.
+- Outputs must be disclosed as AI-generated where the law asks for it.
+  h3metal marks every PNG it writes.
+
+`h3metal download --model flux2-klein-9b` asks you to pass
+`--accept-license` and fetches the model from Black Forest Labs' own
+repositories (or ModelScope's copy). Files that `h3metal convert` writes are
+derivatives of the model and remain under its license. h3metal publishes no
+converted copies of it.
 
 ## Contributing
 

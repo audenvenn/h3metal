@@ -133,6 +133,19 @@ One transformer step at 1024 x 1024 (4,608 rows with the caption) takes 1.24 s, 
 need at their measured peaks (`bench/flux2_step_bench.py`). The products take 63% of the step, attention
 26%, the row kernels (quantization, query and key norms, the modulated norms) 8%.
 
+## FLUX.2 [klein] 9B, against mflux
+
+The same method and prompt as for 4B, with mflux's own 8-bit copy of 9B (`mflux-save --model <checkpoint>
+--base-model flux2-klein-9b --quantize 8`) and `h3metal generate --model flux2-9b`:
+
+| Size | h3metal | mflux | Speed-up |
+|---|---:|---:|---:|
+| 1024 x 1024, prompt seen before (2 runs after a warm-up) | 12.4 s (12.8, 11.9) | 31.8 s (31.6, 31.9) | 2.6x |
+| 1024 x 1024, new prompt every run (2 runs) | 14.1 s (14.1, 14.1) | 31.9 s (32.0, 31.7) | 2.3x |
+
+The process footprints are 2.3 GB for h3metal, which maps its 17 GB of weight files, and 13.9 GB for mflux.
+One transformer step at 1024 x 1024 takes 2.71 s, 71% of what the matrix units need at their measured peaks.
+
 ## Kernels
 
 `bench/hw/mma_rate.py` measures the matrix units on register fragments,

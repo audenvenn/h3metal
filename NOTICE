@@ -12,8 +12,13 @@ h3metal also runs Z-Image-Turbo (Tongyi-MAI) and FLUX.2 [klein] 4B (Black Forest
 Labs), which it does not include either. Both are licensed under the Apache
 License, Version 2.0.
 
-The images in docs/images were generated with MiniMax-H3-Image (and, where
-docs/images/README.md says so, Z-Image-Turbo) and are AI-generated.
+h3metal also runs FLUX.2 [klein] 9B, which it does not include. This FLUX
+Model is licensed by Black Forest Labs Inc. under the FLUX Non-Commercial
+License. Copyright Black Forest Labs Inc. Files that `h3metal convert` writes
+from it are derivatives of it and remain under that license.
+
+The images in docs/images were generated with the models their captions and
+docs/images/README.md name, and are AI-generated.
 
 The register layout of the GPU matrix units' SIMD-group operations follows
 the one in MLX's NAX kernels (https://github.com/ml-explore/mlx, MIT).
