@@ -153,7 +153,9 @@ class Pipeline:
         n_steps = len(sigmas) - 1
         t = time.time()
         T = emb.shape[0]
-        key = (emb.shape, float(emb[0, :8].sum()), float(emb[-1, :8].sum()), refs is None)
+        # The rows depend on the transformer file too: its token refiner and text projection (pDMD's adapter
+        # changes the refiner), so a switch between files must not reuse them.
+        key = (self._dit_path, emb.shape, float(emb[0, :8].sum()), float(emb[-1, :8].sum()), refs is None)
         if getattr(self, "_rows_key", None) != key or text_types is not None:
             text = g.empty((ditm.ops.pad_rows(T, 128), emb.shape[1]), "bf16")
             text.numpy()[:T] = bf16_bits(emb)
