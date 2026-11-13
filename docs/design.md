@@ -174,6 +174,35 @@ after the score product instead of at the end of the block; and splitting
 the score product into two or four independent accumulator chains
 (registers again).
 
+The same decomposition for the current kernel (int8 scores, the leaner
+softmax, ten SIMD-groups), every variant timed in one session at 2048 x 2048
+(4096 x 4096 in parentheses): the products and the softmax alone run at 95%
+(96%) of the floor; a barrier after every block brings that to 92% (93%);
+moving the keys and values under those barriers brings it to 82% (85%), the
+kernel as it is. Without the barrier the moves cost nothing (as measured
+above), so what is left is the barrier coupling every SIMD-group to the
+slowest one. No hand-over without it does better on this GPU:
+
+- When every SIMD-group stores a share of each block, none can start block
+  b + 1 before the slowest has finished block b. With N buffers filled d
+  blocks ahead, the SIMD-groups can drift min(d, N - d - 1) blocks apart:
+  none with two buffers. Counters in threadgroup memory in place of the
+  barrier keep that coupling and add the cost of polling them: 2.5x slower
+  polling with relaxed loads and one acquire fence after, 5x with acquire
+  loads.
+- A third buffer would allow a block of drift, but at 32 keys a block three
+  buffers need 40 KB of threadgroup memory, over the 32 KB limit.
+- One extra SIMD-group that only moves blocks (a producer) lets the others
+  drift a block apart with two buffers. But moving the blocks alone takes it
+  as long as the whole kernel takes (24.8 against 24.5 ms at 2048 x 2048),
+  and even when it moves nothing after the first block, the kernel is about
+  as fast as with the barrier (24.3 against 24.5 ms; 0.35 against 0.34 s at
+  4096 x 4096). With the moves it is 1.8x slower.
+
+Every variant matched the barrier kernel bit for bit before it was timed.
+Their release and acquire ordering costs nothing measurable: dropping the
+fences changes the time by under 0.5%. So the barrier stays.
+
 ## Memory
 
 Weight files (`.h3m`) are mapped read-only and handed to Metal without a copy,
