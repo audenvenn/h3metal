@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Each release carries a wheel with the compiled GPU runtime: `pip install`
+  of it needs no compiler. The README installs it.
+
+### Changed
+
+- The GPU runtime targets macOS 26 explicitly, whatever macOS builds it.
+- `h3metal --help` names the three models.
+
 ## [0.3.0] - 2026-11-13
 
 ### Added

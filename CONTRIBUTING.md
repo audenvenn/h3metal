@@ -69,6 +69,12 @@ which of them you ran and on what machine.
   in `pyproject.toml` and `h3metal/__init__.py`.
 - A release is a tag `vX.Y.Z` on `main` with the matching `CHANGELOG.md`
   section as its notes.
+- Every release carries a wheel with the compiled GPU runtime, so users need
+  no compiler: `uv build --wheel -o dist` on an Apple Silicon Mac (the
+  library targets macOS 26, CMakeLists.txt), checked by installing it into a
+  fresh environment and making an image, then `gh release upload vX.Y.Z
+  dist/h3metal-X.Y.Z-py3-none-macosx_26_0_arm64.whl`. The README's install
+  line names that wheel.
 
 ## The model's license
 
