@@ -43,7 +43,10 @@ class ShardStream:
                     self.cv.wait()
                 if self.stopped:
                     return
-            path, ok, msg = _fetch(item, self.dest)
+            try:
+                path, ok, msg = _fetch(item, self.dest)
+            except Exception as e:  # recorded, so that wait() raises instead of waiting for ever
+                path, ok, msg = item[0], False, f"{type(e).__name__}: {e}"
             with self.cv:
                 self.done[path] = (ok, msg)
                 self.peak_files = max(self.peak_files, self._present())
@@ -63,6 +66,8 @@ class ShardStream:
                 if failed:
                     raise RuntimeError(f"the download of {failed[0]} did not complete; run the command again to "
                                        "resume")
+                if not self.thread.is_alive():
+                    raise RuntimeError(f"the downloader stopped before {path}; run the command again to resume")
                 self.cv.wait(timeout=5)
             ok, msg = self.done[path]
         if not ok:

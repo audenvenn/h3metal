@@ -316,6 +316,31 @@ def test_streamed_conversion_is_the_same():
         assert not [f for f in os.listdir(os.path.join(dest, "transformer")) if f.endswith(".safetensors")]
 
 
+def test_stream_reports_a_failed_download():
+    """A shard whose download fails, or whose downloader crashes, makes the converter's read raise with a message
+    instead of waiting for ever."""
+    from h3metal import download
+    from h3metal.stream import ShardStream
+    orig = download._fetch
+
+    def broken(item, dest):
+        raise OSError("disk full")
+    with tempfile.TemporaryDirectory() as dest:
+        for fake, words in ((lambda item, dest: (item[0], False, "incomplete"), "incomplete"),
+                            (broken, "OSError: disk full")):
+            download._fetch = fake
+            try:
+                stream = ShardStream([("ckpt/a.safetensors", 10, None, "file:///x")], dest, log=lambda *a: None)
+                try:
+                    stream.wait("ckpt/a.safetensors")
+                    raise AssertionError("a failed download must raise")
+                except RuntimeError as e:
+                    assert words in str(e) and "run the command again" in str(e), e
+                stream.close()
+            finally:
+                download._fetch = orig
+
+
 def test_two_transformers_in_one_pass():
     """convert_dits writes the six-step file and the few-step one (a LoRA merged, the flow grids) in one pass over
     streamed shards, each byte for byte what convert_dit writes alone, still with three shards on disk at most."""
