@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `ops.gemm` refuses a tile whose width does not divide the product's
+  columns. The grid covers whole tiles, so such a tile left the last columns
+  unwritten. That, not the matrix units, is why a 32 x 512 tile once gave
+  wrong results on the 5376-column MLP output. The guard it replaces (no
+  tiles wider than 256 columns) would have let a narrower tile do the same,
+  for example a 256-column tile on 1152 columns. No tile in use was affected.
+
 ## [0.2.0] - 2026-11-13
 
 ### Added
