@@ -159,7 +159,9 @@ class Studio:
                 img, timing = generate_edit(pipe, prompt, refs, w, h, seed=seed, progress=progress, **extra)
             else:
                 w, h = (w, h) if size else getattr(pipe, "default_size", (2048, 2048))
-                img, timing = pipe.generate(prompt, w, h, seed=seed, progress=progress, loras=loras, **extra)
+                # MiniMax-H3-Image's pipeline takes no LoRA argument (the request check refuses adapters for it)
+                img, timing = pipe.generate(prompt, w, h, seed=seed, progress=progress,
+                                            **({"loras": loras} if loras else {}), **extra)
         finally:
             self.progress.update(busy=False, stage="", step=0, steps=0)
         ih, iw = img.shape[:2]
@@ -302,6 +304,7 @@ button { font: inherit; border: 0; border-radius: 8px; padding: 10px 14px; curso
 #gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; margin-top: 16px; }
 #gallery img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; cursor: pointer; }
 .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+[hidden] { display: none !important; }  /* .row and label set display, which would show hidden ones */
 </style></head><body>
 <header><b>h3metal studio</b><span>image generation on this Mac's GPU &middot; images are AI-generated</span></header>
 <main>

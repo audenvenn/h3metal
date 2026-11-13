@@ -431,6 +431,55 @@ def test_serve_page_and_checks():
             httpd.shutdown()
 
 
+def test_serve_calls_each_pipeline_with_its_own_arguments():
+    """The web page's server against the pipelines' real signatures (no GPU): every model, text to image and edits,
+    with and without a LoRA or a step count, gets only arguments its pipeline takes."""
+    import inspect
+    from h3metal import pipeline, serve
+    from h3metal.flux2 import Flux2Pipeline
+    from h3metal.zimage import ZImagePipeline
+    img = np.zeros((32, 32, 3), np.uint8)
+    calls = []
+
+    class Fake:
+        def __init__(self, cls):
+            self.sig = inspect.signature(cls.generate)
+
+        def generate(self, *a, **k):
+            self.sig.bind(self, *a, **k)  # TypeError for an argument the real pipeline does not take
+            calls.append(k)
+            return img, "timing"
+
+    edit_sig = inspect.signature(pipeline.generate_edit)
+
+    def fake_edit(*a, **k):
+        edit_sig.bind(*a, **k)
+        calls.append(k)
+        return img, "timing"
+
+    with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as ld:
+        serve.OUT_DIR = d
+        studio = serve.Studio({"MiniMax-H3-Image": "/nonexistent", "Z-Image-Turbo": "/nonexistent",
+                               "FLUX.2 [klein] 4B": "/nonexistent"}, None, ld)
+        studio.steps = {"MiniMax-H3-Image": [6, 2]}
+        fakes = {"MiniMax-H3-Image": Fake(pipeline.Pipeline), "Z-Image-Turbo": Fake(ZImagePipeline),
+                 "FLUX.2 [klein] 4B": Fake(Flux2Pipeline)}
+        studio._pipeline = lambda name: fakes[name]
+        studio._loras = lambda req, name: []
+        orig = pipeline.generate_edit
+        pipeline.generate_edit = fake_edit
+        try:
+            for req in ({"model": "MiniMax-H3-Image", "prompt": "x"},
+                        {"model": "MiniMax-H3-Image", "prompt": "x", "steps": 2},
+                        {"model": "Z-Image-Turbo", "prompt": "x"},
+                        {"model": "FLUX.2 [klein] 4B", "prompt": "x"}):
+                out = studio.generate(req)
+                assert out["url"].startswith("/outputs/"), out
+            assert calls[1].get("steps") == 2 and "steps" not in calls[0], calls
+        finally:
+            pipeline.generate_edit = orig
+
+
 def test_lora_terms_match_the_converter():
     """A LoRA's terms on the converted layers equal the converter's own transform (h3metal/lora.py LinearPlan)
     applied to the dense update scale * B A: for every layout (diffusers names, kohya's, the original fused

@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-11-13
+
+### Fixed
+
+- The web page failed to make a MiniMax-H3-Image image from text ("got an
+  unexpected keyword argument 'loras'") since 0.4.0. It passed its LoRA list
+  to every pipeline, and MiniMax-H3-Image's takes none.
+  `test_serve_calls_each_pipeline_with_its_own_arguments` now checks every
+  model's call against the real pipeline's signature.
+- The web page showed an empty "Steps" box for models with a single step
+  count: the page's own styles overrode the `hidden` attribute.
+
 ## [0.6.2] - 2026-11-13
 
 ### Fixed
