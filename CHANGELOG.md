@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `h3metal download --convert` converts MiniMax-H3-Image while it downloads.
+  - How: the checkpoint's shards come in the order the converters read them,
+    one ahead, and each is deleted once converted (h3metal/stream.py).
+  - Disk: room for the converted model (~44 GB on a 24 GB Mac) and about
+    17 GB more, instead of the 125 GB checkpoint as well.
+  - Resuming: a part already converted is kept when the command runs again.
+- `--pdmd` with `--convert` writes the few-step transformer in the same pass
+  over the shards. `convert_dits` writes several transformer files in one
+  pass, each byte for byte the one `convert_dit` writes alone
+  (`test_two_transformers_in_one_pass`).
+
 ## [0.6.4] - 2026-11-13
 
 ### Fixed

@@ -70,17 +70,23 @@ h3metal serve --open                      # or a web page
   `pip install "h3metal @ git+https://github.com/audenvenn/h3metal"`. It
   needs the Xcode command line tools; pip fetches CMake and Ninja.
 
-MiniMax-H3-Image is converted on your Mac from the official checkpoint:
+MiniMax-H3-Image is converted on your Mac from the official checkpoint,
+while it downloads:
 
 ```sh
-h3metal download                       # the official checkpoint, ~125 GB
-h3metal convert ~/.h3metal/checkpoint  # writes ~/.h3metal/model
+h3metal download --convert --pdmd      # ~125 GB downloaded, ~59 GB kept in ~/.h3metal/model
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
+h3metal generate --steps 2 -p "A red fox in fresh snow at sunrise" -o fox.png   # pDMD's 2-step LoRA
 h3metal generate -p "Put <Picture 1> on a beach at dusk" -i photo.jpg -o edit.png
-
-h3metal convert ~/.h3metal/checkpoint --pdmd   # optional: 2, 3 or 4 steps with pDMD's 2-step LoRA
-h3metal generate --steps 2 -p "A red fox in fresh snow at sunrise" -o fox.png
 ```
+
+`--convert` fetches the checkpoint's shards in the order the converter reads
+them and deletes each one once converted, so the disk needs room for the
+converted model and about 17 GB more, not for the whole checkpoint as well.
+Running the command again resumes; a part already converted is kept.
+`--pdmd` adds the few-step transformer (15 GB) in the same pass. To keep
+the checkpoint instead, `h3metal download` fetches it (~125 GB) and
+`h3metal convert ~/.h3metal/checkpoint [--pdmd]` converts it.
 
 Without `--model`, `generate` uses the first of MiniMax-H3-Image,
 Z-Image-Turbo, FLUX.2 [klein] 4B and 9B that is on the Mac. `--model
@@ -88,10 +94,10 @@ minimax-h3`, `zimage`, `flux2` or `flux2-9b` picks one. Each model
 comes with its own license: MiniMax-H3-Image's limits where and how it may
 be used, so read [The models' licenses](#the-models-licenses) before
 downloading it. `h3metal download --source modelscope` fetches from
-ModelScope instead of Hugging Face. Converting reads the checkpoint once;
-afterwards `~/.h3metal/model` holds everything h3metal runs, 40-50 GB
-depending on the transformer's format (44 GB on a 24 GB Mac, see
-[Weight formats](#weight-formats)), and the checkpoint can be deleted.
+ModelScope instead of Hugging Face. `~/.h3metal/model` then holds
+everything h3metal runs, 40-50 GB depending on the transformer's format
+(44 GB on a 24 GB Mac, see [Weight formats](#weight-formats)), plus 15 GB
+for the few-step transformer.
 
 ## Usage
 
