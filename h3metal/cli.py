@@ -46,13 +46,26 @@ def size_for(ratio: str, area: int = AREAS["4k"]):
     return round(math.sqrt(area * x / y) / 32) * 32, round(math.sqrt(area * y / x) / 32) * 32
 
 
+class Ratio(str):
+    """An aspect ratio from -s without an area (16:9): its size depends on the model (resolve_size)."""
+
+
+def resolve_size(size, native_area: int):
+    """-s's value for a model whose native area is native_area pixels: a ratio without an area takes it."""
+    return size_for(size, native_area) if isinstance(size, Ratio) else size
+
+
 def _size(s: str):
-    """WIDTHxHEIGHT, or a ratio like 16:9 (the official ~16 MP size), optionally @2k or @1k for a smaller area."""
+    """WIDTHxHEIGHT, or a ratio like 16:9 at the model's native area (MiniMax-H3-Image's official ~16 MP sizes,
+    about 1 MP for FLUX.2 [klein] and Z-Image-Turbo), or at @4k, @2k or @1k."""
     s = s.lower()
     try:
         if ":" in s:
             ratio, _, area = s.partition("@")
-            w, h = size_for(ratio, AREAS[area or "4k"])
+            size_for(ratio, AREAS[area or "4k"])  # checks the ratio
+            if not area:
+                return Ratio(ratio)
+            w, h = size_for(ratio, AREAS[area])
         else:
             w, h = (int(x) for x in s.split("x"))
     except (ValueError, KeyError):
@@ -138,7 +151,9 @@ def cmd_generate(a):
         raise ValueError(f"{model_name} runs the step count it was distilled for; --steps is for MiniMax-H3-Image")
     if steps:
         pipe.steps_path(a.steps)  # fails before the text encoder runs if no transformer here runs that many
-    w, h = a.size or ((None, None) if flux2_edit else getattr(pipe, "default_size", (2048, 2048)))
+    native = getattr(pipe, "default_size", None)  # FLUX.2 and Z-Image: 1024 x 1024; MiniMax: its 16 MP sizes
+    size = resolve_size(a.size, native[0] * native[1] if native else AREAS["4k"])
+    w, h = size or ((None, None) if flux2_edit else native or (2048, 2048))
     if model_name == "MiniMax-H3-Image" and (w % 32 or h % 32):
         raise ValueError("MiniMax-H3-Image needs width and height that are multiples of 32")
     for i in range(a.count):
@@ -358,9 +373,10 @@ def main(argv=None):
     g = sub.add_parser("generate", help="text to image, or an edit with --image")
     g.add_argument("-p", "--prompt", required=True)
     g.add_argument("-s", "--size", type=_size, default=None,
-                   help="WIDTHxHEIGHT, or an aspect ratio such as 16:9 for the official ~16 MP size "
-                        "(16:9@2k for ~4 MP); default 1024x1024 for FLUX.2 [klein] and Z-Image-Turbo (an edit "
-                        "with FLUX.2 [klein]: the first reference's size), 2048x2048 for MiniMax-H3-Image")
+                   help="WIDTHxHEIGHT, or an aspect ratio such as 16:9 at the model's native area (MiniMax-H3-"
+                        "Image's official ~16 MP sizes; ~1 MP for FLUX.2 [klein] and Z-Image-Turbo), or 16:9@2k for "
+                        "~4 MP; default 1024x1024 for FLUX.2 [klein] and Z-Image-Turbo (an edit with FLUX.2 "
+                        "[klein]: the first reference's size), 2048x2048 for MiniMax-H3-Image")
     g.add_argument("--seed", type=int, default=0)
     g.add_argument("-n", "--count", type=int, default=1, help="images to make, with seeds seed, seed+1, ...")
     g.add_argument("-o", "--output")
@@ -431,7 +447,10 @@ def main(argv=None):
     except Exception as e:  # a one-line message; H3METAL_DEBUG=1 shows the traceback
         if os.environ.get("H3METAL_DEBUG"):
             raise
-        sys.exit(f"h3metal: error: {e}")
+        hint = ""
+        if "OutOfMemory" in str(e) or "Insufficient Memory" in str(e):
+            hint = " (the image needs more GPU memory than this Mac has for this model: try a smaller -s)"
+        sys.exit(f"h3metal: error: {e}{hint}")
 
 
 if __name__ == "__main__":

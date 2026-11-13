@@ -51,7 +51,7 @@ The release's wheel holds the compiled GPU runtime, so nothing needs
 building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.6.3/h3metal-0.6.3-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.6.4/h3metal-0.6.4-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, ready to run: 8.3 GB
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
@@ -99,9 +99,11 @@ depending on the transformer's format (44 GB on a 24 GB Mac, see
 h3metal generate -p PROMPT [-s SIZE] [--seed N] [-n COUNT] [-o OUT.png] [-i REF.png ...]
 ```
 
-- `-s` takes `WIDTHxHEIGHT` (multiples of 32), or an aspect ratio: `16:9` is
-  MiniMax's recommended 16 MP size for that ratio (5472 x 3072), `16:9@2k`
-  the same ratio at about 4 MP. The default is 2048 x 2048.
+- `-s` takes `WIDTHxHEIGHT` (multiples of 32), or an aspect ratio at the
+  model's native area: `16:9` is MiniMax-H3-Image's recommended 16 MP size
+  for that ratio (5472 x 3072), and about 1 MP (1376 x 768) for FLUX.2
+  [klein] and Z-Image-Turbo. `16:9@2k` means about 4 MP. The default is
+  2048 x 2048 for MiniMax-H3-Image and 1024 x 1024 for the others.
 - Like the official pipeline, h3metal generates at 4 MP or more and resizes
   a smaller request back down afterwards, so `-s 1024x1024` costs as much as
   2048 x 2048; `--min-area 1024` generates at the requested size instead.

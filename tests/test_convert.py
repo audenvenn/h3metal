@@ -263,10 +263,13 @@ def test_torch_randn_replica():
 
 def test_cli_sizes_and_device_check():
     import argparse
-    from h3metal.cli import _size, size_for
+    from h3metal.cli import Ratio, _size, resolve_size, size_for
     from h3metal.gpu import has_matrix_units
     assert size_for("16:9") == (5472, 3072) and size_for("1:1") == (4096, 4096)  # MiniMax's recommended sizes
     assert _size("2048x1536") == (2048, 1536) and _size("16:9@2k") == size_for("16:9", 2048 * 2048)
+    # a ratio alone takes the model's native area: MiniMax's 16 MP, FLUX.2's and Z-Image's 1 MP
+    assert isinstance(_size("16:9"), Ratio) and resolve_size(_size("16:9"), 4096 * 4096) == (5472, 3072)
+    assert resolve_size(_size("16:9"), 1024 * 1024) == (1376, 768) and resolve_size((640, 480), 1) == (640, 480)
     assert _size("2000x1008") == (2000, 1008)  # multiples of 16 pass (Z-Image); MiniMax-H3 checks for 32 later
     for bad in ("2008x2008", "100x100", "16:9@8k", "big"):
         try:
