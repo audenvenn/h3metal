@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
 ### Added
 
 - FLUX.2 [klein] 4B (Black Forest Labs, Apache-2.0), text to image and
@@ -117,6 +119,7 @@ All notable changes to this project are documented here. The format follows
   check of a converted text encoder, and benchmarks of every kernel, of
   image quality and of end-to-end speed against another implementation.
 
-[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/audenvenn/h3metal/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.3.0
 [0.2.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.2.0
 [0.1.0]: https://github.com/audenvenn/h3metal/releases/tag/v0.1.0
