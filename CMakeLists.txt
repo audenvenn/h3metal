@@ -1,4 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
+# Metal 4 (macOS 26) is what h3metal needs; a library built on a newer macOS still loads there (wheels).
+set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "oldest macOS the library runs on")
 project(h3metal LANGUAGES C CXX OBJCXX)
 
 if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")

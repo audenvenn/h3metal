@@ -261,8 +261,8 @@ def cmd_info(a):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="h3metal", description="MiniMax-H3-Image (and Z-Image-Turbo) on Apple "
-                                 "Silicon.")
+    ap = argparse.ArgumentParser(prog="h3metal", description="Image generation on Apple Silicon's GPU matrix units: "
+                                 "FLUX.2 [klein], Z-Image-Turbo and MiniMax-H3-Image.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate", help="text to image, or an edit with --image")
     g.add_argument("-p", "--prompt", required=True)

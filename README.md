@@ -31,15 +31,14 @@ See [Performance](#performance) and [Image quality](#image-quality).
 
 ## Quick start
 
-Needs a Mac with Apple silicon and Metal 4 (macOS 26 or later), Python 3.10+
-and the Xcode command line tools (pip fetches CMake and Ninja to build the
-GPU runtime). The `python3` that comes with macOS is 3.9 and its pip rejects
-the command below with "Invalid requirement": use a newer Python, from
-python.org, Homebrew or uv. The matrix units h3metal is built for are in M5- and M6-class
-GPUs; it is developed and measured on an M6.
+Needs a Mac with Apple silicon and Metal 4 (macOS 26 or later) and Python
+3.10+. The `python3` that comes with macOS is 3.9: use a newer one, from
+python.org, Homebrew or uv. The matrix units h3metal is built for are in M5-
+and M6-class GPUs; it is developed and measured on an M6. The release's
+wheel holds the compiled GPU runtime, so nothing needs building:
 
 ```sh
-pip install "h3metal @ git+https://github.com/audenvenn/h3metal"
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.3.0/h3metal-0.3.0-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, 15 GB (--source modelscope also works)
 h3metal convert ~/.h3metal/flux2-klein-4b  # int8, into ~/.h3metal/flux2-klein, about a minute
@@ -48,7 +47,10 @@ h3metal serve --open                       # or a web page
 ```
 
 Z-Image-Turbo goes the same way (`--model z-image-turbo`, 33 GB, then
-`h3metal convert ~/.h3metal/z-image-turbo`).
+`h3metal convert ~/.h3metal/z-image-turbo`). To build from source instead,
+with the newest changes on `main`: `pip install "h3metal @
+git+https://github.com/audenvenn/h3metal"` (it needs the Xcode command line
+tools; pip fetches CMake and Ninja).
 
 MiniMax-H3-Image is converted on your Mac from the official checkpoint:
 
