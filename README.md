@@ -180,6 +180,9 @@ Images come out as `uint8` arrays; `timing` says where the time went.
   five lane shuffles per 256 values.
 - **Flash attention** with the operands in registers, the score product in
   int8, and the output's rescale skipped whenever no row's maximum moved.
+  MiniMax-H3-Image's queries and keys get the same Hadamard rotation before
+  their int8 rounding, which leaves every score unchanged and the rounding
+  smaller.
 - **One command buffer per block** over memory-mapped weights: only the block
   that runs is pinned. The 26 GB text encoder streams from the SSD with a
   footprint of half a gigabyte, and a transformer larger than the Mac's
@@ -226,6 +229,7 @@ modules (relative L2 error of the output):
 | Transformer, `q8` (every step) | random weights | 0.13% |
 | Transformer, `mix` | random weights | 0.25% |
 | Transformer, `q4` | random weights | 0.35%; 0.26% with GPTQ |
+| Transformer, `q8` / `mix`: the token refiner, one block and the output layer | real weights, against float32 | 0.74% / 1.26% |
 | Text encoder | real weights, nine prompts, against float32 | 0.37% |
 | Vision tower | real weights | 1.1% |
 | VAE encoder | real weights | 0.28% |
