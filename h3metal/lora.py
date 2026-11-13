@@ -264,11 +264,20 @@ def stack(ts: list) -> tuple:
     return np.concatenate([t.A for t in ts]), np.concatenate([t.B for t in ts], axis=1)
 
 
-def parse_spec(spec: str) -> tuple:
-    """"path[:strength]" -> (path, strength)."""
+LORA_DIR = os.path.expanduser("~/.h3metal/loras")
+
+
+def parse_spec(spec: str, lora_dir: str = LORA_DIR) -> tuple:
+    """"path[:strength]" -> (path, strength). A name that is no file is looked up in ~/.h3metal/loras, with or
+    without its .safetensors suffix (where `h3metal download --lora` puts adapters)."""
     m = re.match(r"^(.*?)(?::(-?[0-9.]+))?$", spec)
-    path, s = m.group(1), m.group(2)
-    return os.path.expanduser(path), float(s) if s is not None else 1.0
+    path, s = os.path.expanduser(m.group(1)), m.group(2)
+    if not os.path.exists(path) and os.sep not in path:
+        for cand in (path, path + ".safetensors"):
+            if os.path.isfile(os.path.join(lora_dir, cand)):
+                path = os.path.join(lora_dir, cand)
+                break
+    return path, float(s) if s is not None else 1.0
 
 
 class Loaded:

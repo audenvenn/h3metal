@@ -11,6 +11,9 @@ published SHA-256 are checked. Standard library only.
 By downloading the weights you accept the MiniMax-H3-Image Community License
 Agreement (LICENSE in the downloaded directory), which among other terms
 limits use to its Applicable Territory.
+
+`h3metal download --lora owner/name` fetches a LoRA adapter's file into
+~/.h3metal/loras instead. Adapters carry their own licenses.
 """
 
 from __future__ import annotations
@@ -31,7 +34,13 @@ OTHER = {"z-image-turbo": {"huggingface": "Tongyi-MAI/Z-Image-Turbo", "modelscop
          "flux2-klein-4b": {"huggingface": "black-forest-labs/FLUX.2-klein-4B",
                             "modelscope": "black-forest-labs/FLUX.2-klein-4B",
                             # the transformer again as one file in BFL's own layout, and sample images
-                            "exclude": ["flux-2-klein-4b.safetensors", "*.jpg"]}}
+                            "exclude": ["flux-2-klein-4b.safetensors", "*.jpg"]},
+         "flux2-klein-9b": {"huggingface": "black-forest-labs/FLUX.2-klein-9B",
+                            "modelscope": "black-forest-labs/FLUX.2-klein-9B",
+                            "exclude": ["flux-2-klein-9b.safetensors", "*.jpg"],
+                            # FLUX Non-Commercial License v2.1: `h3metal download` asks for --accept-license
+                            "license": "FLUX Non-Commercial License v2.1 (non-commercial use only; see LICENSE.md "
+                                       "in the downloaded directory)"}}
 UA = {"User-Agent": "h3metal-download"}
 N_LAYERS = 50
 
@@ -146,6 +155,32 @@ def download(dest: str, source: str = "huggingface", jobs: int = 4, log=print, m
                 index = json.load(f)
         todo = needed(files, index)
     return _fetch_all(todo, dest, jobs, log, f"{repo} [{source}]")
+
+
+LORA_DIR = os.path.expanduser("~/.h3metal/loras")
+
+
+def download_lora(spec: str, source: str = "huggingface", dest: str = LORA_DIR, log=print) -> str:
+    """A LoRA adapter from a model repository: "owner/name" (its only .safetensors file) or "owner/name/file".
+    -> the local path, ~/.h3metal/loras/<file> (the generate command's --lora finds it by name)."""
+    parts = spec.strip("/").split("/")
+    if len(parts) < 2:
+        raise SystemExit(f"--lora takes owner/name or owner/name/file.safetensors, not {spec!r}")
+    repo, want = "/".join(parts[:2]), "/".join(parts[2:]) or None
+    files = [f for f in list_files(source, repo) if f[0].endswith(".safetensors")]
+    if want:
+        files = [f for f in files if f[0] == want]
+    elif len(files) > 1:
+        names = ", ".join(f[0] for f in files)
+        raise SystemExit(f"{repo} has several .safetensors files ({names}): name one, as {repo}/<file>")
+    if not files:
+        raise SystemExit(f"{repo}: no {want or '.safetensors file'} there")
+    path, size, sha, url = files[0]
+    name = os.path.basename(path)
+    os.makedirs(dest, exist_ok=True)
+    if not _fetch_all([(name, size, sha, url)], dest, 1, log, f"{repo} [{source}]"):
+        raise SystemExit("the download did not complete; run the command again to resume")
+    return os.path.join(dest, name)
 
 
 if __name__ == "__main__":

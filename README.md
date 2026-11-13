@@ -125,7 +125,8 @@ LoRA adapters work with Z-Image-Turbo and FLUX.2 [klein]. Pass
 in `~/.h3metal/loras`:
 
 ```sh
-h3metal generate --model zimage -p "Pixel art style. A red fox in fresh snow" --lora pixel_art.safetensors
+h3metal download --lora AI-ModelScope/pixel_art_style_lora_z_image_turbo --source modelscope  # into ~/.h3metal/loras
+h3metal generate --model zimage -p "Pixel art style. A red fox in fresh snow" --lora pixel_art_style_z_image_turbo
 ```
 
 h3metal reads diffusers', kohya's and the original checkpoints' layouts. It
@@ -370,6 +371,22 @@ FLUX.2 [klein] 4B is licensed by Black Forest Labs under the
 [Apache License 2.0](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B).
 `h3metal download --model flux2-klein-4b` fetches it from Black Forest Labs'
 own repositories (or ModelScope's copy).
+
+FLUX.2 [klein] 9B is licensed by Black Forest Labs under the
+[FLUX Non-Commercial License v2.1](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md),
+together with BFL's [Acceptable Use Policy](https://bfl.ai/legal/usage-policy):
+
+- It allows non-commercial use only. BFL offers commercial licenses.
+- You must filter its outputs for unlawful or infringing content, or review
+  them, before you share them.
+- Outputs must be disclosed as AI-generated where the law asks for it.
+  h3metal marks every PNG it writes.
+
+`h3metal download --model flux2-klein-9b` asks you to pass
+`--accept-license` and fetches the model from Black Forest Labs' own
+repositories (or ModelScope's copy). Files that `h3metal convert` writes are
+derivatives of the model and remain under its license. h3metal publishes no
+converted copies of it.
 
 ## Contributing
 

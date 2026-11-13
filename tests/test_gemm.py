@@ -111,14 +111,21 @@ def check_dit_tiles(model: str = "minimax-h3"):
         D, inner, F = 5376, 7168, 14336
         products = (("qkv", D, 3 * inner, 0), ("out", inner, D, 1), ("fc1", D, 2 * F, 0), ("fc2", F, D, 1))
         sizes = (1324, 4396, 16684)
-    else:  # Z-Image: every product stores its result (the norm after it needs the whole row)
+    elif model == "z-image":  # every product stores its result (the norm after it needs the whole row)
         from h3metal.zimage import _ztile as _tile
         D, F = 3840, 10240
         products = (("qkv", D, 3 * D, 0), ("out", D, D, 0), ("fc1", D, 2 * F, 0), ("fc2", F, D, 0))
         sizes = (4160, 16448)  # 1024 and 2048 pixels square (64 caption rows)
+    else:  # FLUX.2 [klein] 4B or 9B: the double blocks' image and caption rows run apart, the single blocks' together
+        from h3metal.flux2 import _ftile as _tile
+        D = {"flux2-4b": 3072, "flux2-9b": 4096}[model]
+        F = 3 * D
+        products = (("qkv", D, 3 * D, 0), ("out", D, D, 1), ("fc1", D, 2 * F, 0), ("fc2", F, D, 1),
+                    ("qkv_mlp", D, 3 * D + 2 * F, 0))
+        sizes = (512, 4096, 4608)  # caption rows, image rows at 1024 x 1024, both
     gpu = Gpu()
     rng = np.random.default_rng(1)
-    for fmt in ("q8", "q4"):
+    for fmt in (("q8",) if model.startswith("flux2") else ("q8", "q4")):
         for name, K, N, epi in products:
             for M in sizes:
                 cfg = _tile(QWeight(fmt, None, None, N, K), M)
@@ -267,4 +274,6 @@ if __name__ == "__main__":
     check_partial_tiles_refused()
     check_dit_tiles()
     check_dit_tiles("z-image")
+    check_dit_tiles("flux2-4b")
+    check_dit_tiles("flux2-9b")
     print("ok")

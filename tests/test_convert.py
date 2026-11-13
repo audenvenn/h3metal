@@ -140,10 +140,14 @@ def test_cli_sizes_and_device_check():
         except argparse.ArgumentTypeError:
             pass
     assert has_matrix_units("Apple M6") and has_matrix_units("Apple M5 Pro") and not has_matrix_units("Apple M4 Max")
-    from h3metal.cli import DEFAULT_MODEL, ZIMAGE_MODEL, _model_dir
+    from h3metal.cli import DEFAULT_MODEL, FLUX2_9B_MODEL, FLUX2_MODEL, ZIMAGE_MODEL, _model_dir
     assert _model_dir("zimage") == ZIMAGE_MODEL and _model_dir("Z-Image-Turbo") == ZIMAGE_MODEL
     assert _model_dir("minimax-h3") == DEFAULT_MODEL and _model_dir("/some/dir") == "/some/dir"
-    assert _model_dir(None) in (DEFAULT_MODEL, ZIMAGE_MODEL)  # whichever is converted, MiniMax-H3 first
+    assert _model_dir("flux2") == FLUX2_MODEL and _model_dir("flux2-9b") == FLUX2_9B_MODEL
+    # whichever is converted, in this order; MiniMax-H3's directory when none is
+    assert _model_dir(None) in (DEFAULT_MODEL, ZIMAGE_MODEL, FLUX2_MODEL, FLUX2_9B_MODEL)
+    from h3metal.flux2 import variant_name
+    assert variant_name(3072) == "FLUX.2 [klein] 4B" and variant_name(4096) == "FLUX.2 [klein] 9B"
     from h3metal.cli import auto_format
     assert [auto_format(g * 2**30) for g in (16, 24, 32, 64)] == ["q4", "mix", "q8", "q8"]
 
@@ -155,18 +159,57 @@ def test_download_choices():
     real = dl._json, dl._fetch_all
     seen = []
     try:
-        names = ("model_index.json", "transformer/a.safetensors", "flux-2-klein-4b.safetensors", "sample.jpg")
+        names = ("model_index.json", "transformer/a.safetensors", "flux-2-klein-4b.safetensors",
+                 "flux-2-klein-9b.safetensors", "sample.jpg")
         dl._json = lambda url: {"Code": 200, "Data": {"Files": [{"Path": n, "Size": 1, "Type": "blob"} for n in names]}} \
             if "modelscope" in url else {"siblings": [{"rfilename": n, "size": 1} for n in names]}
         dl._fetch_all = lambda todo, dest, jobs, log, what: seen.append((what, dest, [f[0] for f in todo])) or True
         cli.main(["download", "--model", "flux2-klein-4b"])
         cli.main(["download", "--model", "z-image-turbo", "--source", "modelscope"])
         home = os.path.expanduser("~/.h3metal")
-        assert seen[0] == ("black-forest-labs/FLUX.2-klein-4B [huggingface]", f"{home}/flux2-klein-4b",
-                           ["model_index.json", "transformer/a.safetensors"]), seen[0]  # no duplicate, no samples
+        assert seen[0][:2] == ("black-forest-labs/FLUX.2-klein-4B [huggingface]", f"{home}/flux2-klein-4b") and \
+            sorted(seen[0][2]) == ["flux-2-klein-9b.safetensors", "model_index.json", "transformer/a.safetensors"]
         assert seen[1][:2] == ("Tongyi-MAI/Z-Image-Turbo [modelscope]", f"{home}/z-image-turbo"), seen[1]
+        try:  # klein 9B's license is non-commercial: no download without accepting it
+            cli.main(["download", "--model", "flux2-klein-9b"])
+            raise AssertionError("the 9B download did not ask for the license")
+        except SystemExit as e:
+            assert "Non-Commercial" in str(e) and "--accept-license" in str(e), e
+        assert len(seen) == 2
+        cli.main(["download", "--model", "flux2-klein-9b", "--source", "modelscope", "--accept-license"])
+        assert seen[2][:2] == ("black-forest-labs/FLUX.2-klein-9B [modelscope]", f"{home}/flux2-klein-9b") and \
+            sorted(seen[2][2]) == ["flux-2-klein-4b.safetensors", "model_index.json", "transformer/a.safetensors"]
     finally:
         dl._json, dl._fetch_all = real
+
+
+def test_lora_download_and_names():
+    """`h3metal download --lora owner/name[/file]` (no network: stand-ins) and --lora NAME's lookup."""
+    from h3metal import download as dl
+    from h3metal.lora import parse_spec
+    real = dl.list_files, dl._fetch_all
+    seen = []
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            dl.list_files = lambda source, repo: [(f, 1, None, f"https://example/{repo}/{f}") for f in
+                                                  {"a/one": ["README.md", "style.safetensors"],
+                                                   "a/two": ["x.safetensors", "y.safetensors"]}[repo]]
+            dl._fetch_all = lambda todo, dest, jobs, log, what: seen.append((todo[0][0], dest)) or True
+            assert dl.download_lora("a/one", dest=d) == os.path.join(d, "style.safetensors")
+            assert dl.download_lora("a/two/y.safetensors", dest=d) == os.path.join(d, "y.safetensors")
+            for bad in ("a/two", "a/two/z.safetensors", "single"):
+                try:
+                    dl.download_lora(bad, dest=d)
+                    raise AssertionError(bad)
+                except SystemExit:
+                    pass
+            assert seen == [("style.safetensors", d), ("y.safetensors", d)], seen
+        finally:
+            dl.list_files, dl._fetch_all = real
+        open(os.path.join(d, "pixel.safetensors"), "wb").close()
+        assert parse_spec("pixel:0.7", d) == (os.path.join(d, "pixel.safetensors"), 0.7)
+        assert parse_spec("pixel.safetensors", d) == (os.path.join(d, "pixel.safetensors"), 1.0)
+        assert parse_spec("/x/missing.safetensors:-1", d) == ("/x/missing.safetensors", -1.0)
 
 
 def test_serve_page_and_checks():

@@ -532,6 +532,27 @@ def prepare_reference(image) -> np.ndarray:
     return (np.asarray(im, np.float32) / np.float32(255) * 2 - 1).astype(np.float32)
 
 
+VARIANTS = {3072: "FLUX.2 [klein] 4B", 4096: "FLUX.2 [klein] 9B"}  # by the transformer's width
+
+
+def variant_name(dim: int) -> str:
+    return VARIANTS.get(dim, f"FLUX.2 [klein] (width {dim})")
+
+
+def flux2_name(model_dir: str) -> str:
+    """A converted directory's model name, from its transformer's width."""
+    from .weights import read_header
+    meta = read_header(os.path.join(os.path.expanduser(model_dir), "dit.h3m"))["meta"]
+    return variant_name(meta["config"]["dim"])
+
+
+def checkpoint_name(src: str) -> str:
+    """An original checkpoint's model name, from its transformer's config."""
+    with open(os.path.join(os.path.expanduser(src), "transformer", "config.json")) as fh:
+        c = json.load(fh)
+    return variant_name(c["num_attention_heads"] * c["attention_head_dim"])
+
+
 def is_flux2_dir(model_dir: str) -> bool:
     """A converted FLUX.2 directory (its transformer file says so)."""
     p = os.path.join(os.path.expanduser(model_dir), "dit.h3m")
@@ -575,7 +596,7 @@ class Flux2Pipeline:
     """Text to image, and edits from reference images, with FLUX.2 [klein]: four steps, no guidance, the FLUX.2
     decoder. A reference image's latents join the image rows (after the generated image's) at their own place on
     the rotary embedding's first axis, 10 per reference."""
-    model_name = "FLUX.2 [klein] 4B"
+    model_name = "FLUX.2 [klein] 4B"  # each pipeline reads its own (flux2_name)
     default_size = (1024, 1024)
     steps = 4
 
@@ -590,6 +611,7 @@ class Flux2Pipeline:
             if not os.path.exists(p):
                 raise FileNotFoundError(f"missing {p}: convert a FLUX.2 [klein] checkpoint with `h3metal convert` first")
         self.tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
+        self.model_name = flux2_name(model_dir)
         self._te_cache: dict[str, np.ndarray] = {}
         self._dit = self._dit_wf = None
         self.loras = lora.Loaded()

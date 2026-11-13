@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `h3metal download --lora OWNER/NAME[/FILE]` fetches a LoRA adapter into
+  `~/.h3metal/loras`, where `--lora NAME` finds it by name.
+
 ## [0.4.0] - 2026-11-13
 
 ### Added
