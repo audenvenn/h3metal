@@ -27,6 +27,8 @@ ap.add_argument("--size", type=int, default=1024)
 ap.add_argument("--seed", type=int, default=42)
 ap.add_argument("--prompt", default="A red fox sitting in fresh snow at sunrise, photorealistic, soft golden light.")
 ap.add_argument("--device", default="mps")
+ap.add_argument("--lora", help="a LoRA file, loaded with diffusers' load_lora_weights")
+ap.add_argument("--lora-scale", type=float, default=1.0)
 a = ap.parse_args()
 dt = torch.bfloat16
 
@@ -53,6 +55,10 @@ vae = AutoencoderKL.from_pretrained(os.path.join(a.src, "vae"), torch_dtype=dt).
 sched = FlowMatchEulerDiscreteScheduler.from_pretrained(os.path.join(a.src, "scheduler"))
 pipe = ZImagePipeline(scheduler=sched, vae=vae, text_encoder=None, tokenizer=None, transformer=tr)
 rec = {"cap": embeds[0].float().cpu().numpy()}
+if a.lora:
+    pipe.load_lora_weights(a.lora, adapter_name="lora")
+    pipe.set_adapters(["lora"], adapter_weights=[a.lora_scale])
+    rec.update(lora=os.path.abspath(a.lora), lora_scale=a.lora_scale)
 orig_forward = pipe.transformer.forward
 
 
@@ -76,4 +82,4 @@ with torch.no_grad():
     img = vae.decode(z, return_dict=False)[0]
     rec["image"] = (img[0].float().cpu().permute(1, 2, 0).numpy() / 2 + 0.5).clip(0, 1)
 np.savez(a.out, prompt=a.prompt, seed=a.seed, size=a.size, **rec)
-print("saved", a.out, {k: v.shape for k, v in rec.items()})
+print("saved", a.out, {k: getattr(v, "shape", v) for k, v in rec.items()})

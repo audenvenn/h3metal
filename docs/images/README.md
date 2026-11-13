@@ -31,3 +31,20 @@ in fresh snow at sunrise, photorealistic, soft golden light.", seed 42,
 MiniMax-H3-Image is licensed under the MiniMax-H3-Image Community License
 Agreement, Copyright © 2026 MiniMax. All Rights Reserved. Z-Image-Turbo is
 licensed under the Apache License, Version 2.0 (Tongyi-MAI).
+
+`lora_outpaint.jpg`: AI-generated, both halves.
+
+- **Left, the input:** h3metal's FLUX.2 [klein] 4B at 1024 x 1024, seed 2,
+  from the prompt "A paper lantern festival over a river at night,
+  photorealistic." It was shrunk to 576 x 576 and centered on a pure green
+  1024 x 1024 canvas.
+- **Right, the edit:** the same model with fal's outpainting adapter
+  ([fal/flux-2-klein-4B-outpaint-lora](https://huggingface.co/fal/flux-2-klein-4B-outpaint-lora),
+  Apache-2.0), seed 42, 13 s on the Mac mini. The prompt is the adapter's,
+  "Fill the green spaces according to the image".
+- Both halves were resized to 800 x 800 for the page.
+
+```sh
+h3metal generate --model flux2 -p "Fill the green spaces according to the image" -i framed.png \
+    --lora flux-outpaint-lora.safetensors --seed 42 -o outpainted.png
+```

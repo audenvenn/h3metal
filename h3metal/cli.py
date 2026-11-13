@@ -121,6 +121,10 @@ def cmd_generate(a):
                          "MiniMax-H3-Image")
     _check_device(pipe.gpu.device)
     flux2_edit = model_name.startswith("FLUX.2") and a.image
+    from .lora import parse_spec
+    loras = [parse_spec(s) for s in a.lora or []]
+    if loras and model_name == "MiniMax-H3-Image":
+        raise ValueError("LoRA adapters work with Z-Image-Turbo and FLUX.2 [klein]")
     w, h = a.size or ((None, None) if flux2_edit else getattr(pipe, "default_size", (2048, 2048)))
     if model_name == "MiniMax-H3-Image" and (w % 32 or h % 32):
         raise ValueError("MiniMax-H3-Image needs width and height that are multiples of 32")
@@ -129,20 +133,22 @@ def cmd_generate(a):
         t1 = time.time()
         if flux2_edit:  # the official pipeline: without -s the image takes the first reference's size
             refs = [_open_image(p) for p in a.image]
-            img, timing = pipe.generate(a.prompt, w, h, seed=seed, images=refs, progress=_progress)
+            img, timing = pipe.generate(a.prompt, w, h, seed=seed, images=refs, progress=_progress, loras=loras)
         elif a.image:
             refs = [_open_image(p) for p in a.image]
             img, timing = generate_edit(pipe, a.prompt, refs, w, h, seed=seed, min_area=a.min_area,
                                         progress=_progress)
         else:
-            img, timing = pipe.generate(a.prompt, w, h, seed=seed, min_area=a.min_area, progress=_progress)
+            img, timing = pipe.generate(a.prompt, w, h, seed=seed, min_area=a.min_area, progress=_progress,
+                                        **({"loras": loras} if loras else {}))
         out = a.output or f"h3metal_{int(time.time())}.png"
         if a.count > 1:
             stem, ext = os.path.splitext(out)
             out = f"{stem}_{seed}{ext or '.png'}"
         ih, iw = img.shape[:2]
         _save(img, out, {"prompt": a.prompt, "seed": seed, "size": f"{iw}x{ih}", "model": model_name,
-                         "references": ", ".join(os.path.basename(p) for p in a.image or []) or "none"})
+                         "references": ", ".join(os.path.basename(p) for p in a.image or []) or "none",
+                         "loras": ", ".join(f"{os.path.basename(p)}:{s:g}" for p, s in loras) or "none"})
         print(f"{out}: {iw}x{ih}, seed {seed}; {timing}; wall {time.time() - (t0 if i == 0 else t1):.1f}s")
 
 
@@ -234,7 +240,7 @@ def cmd_serve(a):
         default = "Z-Image-Turbo" if is_zimage_dir(d) else "FLUX.2 [klein] 4B" if is_flux2_dir(d) else \
             "MiniMax-H3-Image"
         models[default] = d
-    serve(models, default, host=a.host, port=a.port, open_browser=a.open)
+    serve(models, default, host=a.host, port=a.port, open_browser=a.open, lora_dir=a.loras)
 
 
 def cmd_info(a):
@@ -268,17 +274,21 @@ def main(argv=None):
     g.add_argument("-p", "--prompt", required=True)
     g.add_argument("-s", "--size", type=_size, default=None,
                    help="WIDTHxHEIGHT, or an aspect ratio such as 16:9 for the official ~16 MP size "
-                        "(16:9@2k for ~4 MP); default 2048x2048 (1024x1024 for Z-Image-Turbo)")
+                        "(16:9@2k for ~4 MP); default 1024x1024 for FLUX.2 [klein] and Z-Image-Turbo (an edit "
+                        "with FLUX.2 [klein]: the first reference's size), 2048x2048 for MiniMax-H3-Image")
     g.add_argument("--seed", type=int, default=0)
     g.add_argument("-n", "--count", type=int, default=1, help="images to make, with seeds seed, seed+1, ...")
     g.add_argument("-o", "--output")
     g.add_argument("-i", "--image", action="append", help="reference image (repeat for several); makes it an edit")
+    g.add_argument("--lora", action="append", metavar="FILE[:STRENGTH]",
+                   help="a LoRA adapter (.safetensors) for Z-Image-Turbo or FLUX.2 [klein], at a strength "
+                        "(default 1); repeat for several")
     g.add_argument("--min-area", type=int, default=2048 * 2048,
                    help="smallest canvas the image is generated on (default 2048*2048, as released); "
                         "1024 generates at the requested size")
     g.add_argument("--model", default=None,
-                   help="a converted model's directory, or zimage / minimax-h3 for the default ones (default: "
-                   "MiniMax-H3-Image if it is converted, else Z-Image-Turbo)")
+                   help="a converted model's directory, or flux2 / zimage / minimax-h3 for the default ones "
+                   "(default: the first converted of MiniMax-H3-Image, Z-Image-Turbo, FLUX.2 [klein])")
     g.set_defaults(func=cmd_generate)
     c = sub.add_parser("convert", help="convert the official weights into h3metal's format")
     c.add_argument("src", help="the MiniMax-H3-Image directory (transformer/, text_encoder/, vae/, ...), or a "
@@ -305,6 +315,8 @@ def main(argv=None):
     v.add_argument("--host", default="127.0.0.1", help="the address to listen on (default: this Mac only)")
     v.add_argument("--port", type=int, default=7860)
     v.add_argument("--open", action="store_true", help="open the page in the browser")
+    v.add_argument("--loras", default="~/.h3metal/loras", help="the LoRA files the page offers (default "
+                   "~/.h3metal/loras)")
     v.set_defaults(func=cmd_serve)
     i = sub.add_parser("info", help="device and model files")
     i.add_argument("--model", default=None)

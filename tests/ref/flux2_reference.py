@@ -30,6 +30,8 @@ ap.add_argument("--size", type=int, default=1024)
 ap.add_argument("--seed", type=int, default=42)
 ap.add_argument("--prompt", default="A red fox sitting in fresh snow at sunrise, photorealistic, soft golden light.")
 ap.add_argument("--device", default="mps")
+ap.add_argument("--lora", help="a LoRA file, loaded with diffusers' load_lora_weights")
+ap.add_argument("--lora-scale", type=float, default=1.0)
 ap.add_argument("--image", help="a reference image: an edit")
 a = ap.parse_args()
 dt = torch.bfloat16
@@ -60,6 +62,10 @@ vae = AutoencoderKLFlux2.from_pretrained(os.path.join(a.src, "vae"), torch_dtype
 sched = FlowMatchEulerDiscreteScheduler.from_pretrained(os.path.join(a.src, "scheduler"))
 pipe = Flux2KleinPipeline(scheduler=sched, vae=vae, text_encoder=None, tokenizer=None, transformer=tr,
                           is_distilled=True)
+if a.lora:
+    pipe.load_lora_weights(a.lora, adapter_name="lora")
+    pipe.set_adapters(["lora"], adapter_weights=[a.lora_scale])
+    rec.update(lora=os.path.abspath(a.lora), lora_scale=a.lora_scale)
 orig_forward = pipe.transformer.forward
 
 

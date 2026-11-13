@@ -15,12 +15,15 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 OUT_DIR = os.path.expanduser("~/.h3metal/outputs")
+LORA_DIR = os.path.expanduser("~/.h3metal/loras")
 MAX_BODY = 64 << 20
+MAX_LORAS = 4
 
 
 class Studio:
-    def __init__(self, models: dict[str, str], default: str | None):
+    def __init__(self, models: dict[str, str], default: str | None, lora_dir: str = LORA_DIR):
         self.models = models                    # name -> converted directory
+        self.lora_dir = lora_dir                # the page offers the .safetensors files here
         self.default = default if default in models else next(iter(models), None)
         self.lock = threading.Lock()            # one image at a time
         self.pipe = self.pipe_name = None
@@ -38,6 +41,30 @@ class Studio:
             self.pipe_name = name
         return self.pipe
 
+    def lora_files(self) -> list[str]:
+        if not os.path.isdir(self.lora_dir):
+            return []
+        return sorted(f for f in os.listdir(self.lora_dir) if f.endswith(".safetensors"))
+
+    def _loras(self, req: dict, name: str) -> list:
+        """The request's adapters [(path, strength)]: files of the LoRA directory only, by name."""
+        items = req.get("loras") or []
+        if not items:
+            return []
+        if name == "MiniMax-H3-Image":
+            raise ValueError("LoRA adapters work with Z-Image-Turbo and FLUX.2 [klein]")
+        if len(items) > MAX_LORAS:
+            raise ValueError(f"at most {MAX_LORAS} LoRA adapters")
+        files, out = set(self.lora_files()), []
+        for it in items:
+            f, s = str(it.get("name", "")), float(it.get("strength", 1.0))
+            if f not in files:
+                raise ValueError(f"no LoRA {f!r} in {self.lora_dir}")
+            if not -4.0 <= s <= 4.0:
+                raise ValueError("LoRA strength must be between -4 and 4")
+            out.append((os.path.join(self.lora_dir, f), s))
+        return out
+
     def generate(self, req: dict) -> dict:
         name = req.get("model") or self.default  # the request is checked before anything heavy is imported
         if name not in self.models:
@@ -51,6 +78,7 @@ class Studio:
         images = req.get("images") or []
         if images and name == "Z-Image-Turbo":
             raise ValueError("Z-Image-Turbo makes images from text only")
+        loras = self._loras(req, name)
         from .cli import _save
         from .pipeline import generate_edit
         refs = []
@@ -66,19 +94,20 @@ class Studio:
             pipe = self._pipeline(name)
             self.progress["stage"] = "text"
             if name.startswith("FLUX.2"):
-                img, timing = pipe.generate(prompt, w, h, seed=seed, images=refs or None, progress=progress)
+                img, timing = pipe.generate(prompt, w, h, seed=seed, images=refs or None, progress=progress,
+                                            loras=loras)
             elif refs:  # MiniMax-H3-Image
                 w, h = (w, h) if size else (2048, 2048)
                 img, timing = generate_edit(pipe, prompt, refs, w, h, seed=seed, progress=progress)
             else:
                 w, h = (w, h) if size else getattr(pipe, "default_size", (2048, 2048))
-                img, timing = pipe.generate(prompt, w, h, seed=seed, progress=progress)
+                img, timing = pipe.generate(prompt, w, h, seed=seed, progress=progress, loras=loras)
         finally:
             self.progress.update(busy=False, stage="", step=0, steps=0)
         ih, iw = img.shape[:2]
         out = os.path.join(OUT_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png")
         _save(img, out, {"prompt": prompt, "seed": seed, "size": f"{iw}x{ih}", "model": name,
-                         "references": str(len(refs)) if refs else "none"})
+                         "references": str(len(refs)) if refs else "none", "loras": _lora_text(loras)})
         return {"url": "/outputs/" + os.path.basename(out), "size": [iw, ih], "seed": seed, "model": name,
                 "timing": str(timing), "wall": round(time.time() - t0, 1)}
 
@@ -95,6 +124,10 @@ class Studio:
             out.append({"url": "/outputs/" + f, "prompt": meta.get("prompt", ""), "seed": meta.get("seed", ""),
                         "size": meta.get("size", ""), "model": meta.get("model", "")})
         return out
+
+
+def _lora_text(loras) -> str:
+    return ", ".join(f"{os.path.basename(p)}:{s:g}" for p, s in loras) or "none"
 
 
 def make_handler(studio: Studio):
@@ -118,7 +151,7 @@ def make_handler(studio: Studio):
                 self._send(200, PAGE.encode(), "text/html; charset=utf-8")
             elif self.path == "/state":
                 self._json(200, {"models": list(studio.models), "default": studio.default,
-                                 "progress": studio.progress})
+                                 "loras": studio.lora_files(), "progress": studio.progress})
             elif self.path == "/history":
                 self._json(200, studio.history())
             elif self.path.startswith("/outputs/"):
@@ -156,11 +189,11 @@ def make_handler(studio: Studio):
 
 
 def serve(models: dict[str, str], default: str | None, host: str = "127.0.0.1", port: int = 7860,
-          open_browser: bool = False):
+          open_browser: bool = False, lora_dir: str = LORA_DIR):
     if not models:
         raise SystemExit("no converted model: `h3metal download --model z-image-turbo` (or flux2-klein-4b, "
                          "minimax-h3) and `h3metal convert` first")
-    studio = Studio(models, default)
+    studio = Studio(models, default, os.path.expanduser(lora_dir))
     httpd = ThreadingHTTPServer((host, port), make_handler(studio))
     url = f"http://{host}:{port}/"
     print(f"h3metal studio at {url} ({', '.join(models)}); Ctrl-C stops it", flush=True)
@@ -222,6 +255,9 @@ button { font: inherit; border: 0; border-radius: 8px; padding: 10px 14px; curso
     <option value="auto">as the reference (edits)</option></select></div>
   <label for="seed">Seed</label>
   <div class="row"><input id="seed" type="number" value="0" min="0"><button class="ghost" id="rnd" title="random seed">&#x21bb;</button></div>
+  <label for="lora">LoRA (files in ~/.h3metal/loras)</label>
+  <div class="row"><select id="lora"><option value="">none</option></select>
+    <input id="strength" type="number" value="1" step="0.1" min="-4" max="4" title="strength" style="flex: 0 0 76px"></div>
   <label id="reflabel" for="files">Reference images (edits)</label>
   <input id="files" type="file" accept="image/*" multiple><div id="refs"></div>
   <button id="go">Generate</button>
@@ -242,6 +278,7 @@ function syncRefs() { const ok = refAllowed(); $('files').disabled = !ok; $('ref
 async function init() {
   const s = await state();
   for (const m of s.models) { const o = document.createElement('option'); o.textContent = m; $('model').appendChild(o); }
+  for (const f of s.loras || []) { const o = document.createElement('option'); o.textContent = f; $('lora').appendChild(o); }
   if (s.default) $('model').value = s.default;
   syncRefs(); loadHistory();
 }
@@ -273,7 +310,8 @@ function poll() {
 $('go').onclick = async () => {
   const size = $('size').value;
   const body = { model: $('model').value, prompt: $('prompt').value, seed: +$('seed').value,
-                 size: size === 'auto' ? null : size.split('x').map(Number), images: refAllowed() ? refs : [] };
+                 size: size === 'auto' ? null : size.split('x').map(Number), images: refAllowed() ? refs : [],
+                 loras: $('lora').value ? [{ name: $('lora').value, strength: +$('strength').value }] : [] };
   $('go').disabled = true; $('bar').firstChild.style.width = '0'; $('status').textContent = 'starting'; poll();
   try {
     const r = await fetch('/generate', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });

@@ -32,10 +32,11 @@ import time
 
 import numpy as np
 
-from . import ops
+from . import lora, ops
 from .convert import silu, timestep_embedding
 from .gpu import Gpu, Tensor
-from .quant import quantize, random_signs, rotate_in
+from .lora import LinearPlan, Part
+from .quant import quantize, random_signs
 from .st import Sharded
 from .weights import WeightFile, Writer
 from .zimage import _pair_perm, _ztile, rope_tables
@@ -85,6 +86,79 @@ def _signs(seed: int, layer: int, role: int, n: int) -> np.ndarray:
     return random_signs(n, seed * 1_000_003 + layer * 101 + role)
 
 
+HOST = {"t_lin1": "time_guidance_embed.timestep_embedder.linear_1",
+        "t_lin2": "time_guidance_embed.timestep_embedder.linear_2",
+        "mod_img": "double_stream_modulation_img.linear", "mod_txt": "double_stream_modulation_txt.linear",
+        "mod_single": "single_stream_modulation.linear", "mod_final": "norm_out.linear"}
+HALF = {"x_embed": "x_embedder", "ctx_embed": "context_embedder", "proj_out": "proj_out"}
+
+
+def model_plans(c: dict, seed: int) -> tuple:
+    """Every converted linear layer (h3metal/lora.py): which rows of which original layers, in which order,
+    with which signs, and the rotation of their inputs; the converter and LoRA adapters both use these. And the
+    aliases: the original checkpoint's names (fused attention projections), which most FLUX.2 LoRAs use."""
+    D, H, hd, F = c["dim"], c["heads"], c["head_dim"], c["ffn"]
+    L2, L1, C = c["double_layers"], c["single_layers"], c["in_channels"]
+    perm = _pair_perm(H, hd)
+    rng = np.arange
+    plans = {
+        "t_lin1": LinearPlan("host", [Part(HOST["t_lin1"], D)], c["t_channels"], rotate=False),
+        "t_lin2": LinearPlan("host", [Part(HOST["t_lin2"], D)], D, rotate=False),
+        "mod_img": LinearPlan("host", [Part(HOST["mod_img"], 6 * D)], D, rotate=False),
+        "mod_txt": LinearPlan("host", [Part(HOST["mod_txt"], 6 * D)], D, rotate=False),
+        "mod_single": LinearPlan("host", [Part(HOST["mod_single"], 3 * D)], D, rotate=False),
+        "mod_final": LinearPlan("host", [Part(HOST["mod_final"], 2 * D)], D, rotate=False),
+        "x_embed": LinearPlan("f16", [Part(HALF["x_embed"], D)], C, rotate=False),
+        "ctx_embed": LinearPlan("f16", [Part(HALF["ctx_embed"], D)], c["joint_dim"], rotate=False),
+        "proj_out": LinearPlan("f16", [Part(HALF["proj_out"], C)], D, rotate=False),
+    }
+    aliases = {"img_in": [(HALF["x_embed"], 0)], "txt_in": [(HALF["ctx_embed"], 0)],
+               "time_in.in_layer": [(HOST["t_lin1"], 0)], "time_in.out_layer": [(HOST["t_lin2"], 0)],
+               "final_layer.linear": [(HALF["proj_out"], 0)],
+               # the original final layer's modulation is (shift, scale); diffusers' norm_out (scale, shift)
+               "final_layer.adaLN_modulation.1": [(HOST["mod_final"], np.r_[D:2 * D, 0:D])],
+               "single_stream_modulation.lin": [(HOST["mod_single"], 0)],
+               "double_stream_modulation_img.lin": [(HOST["mod_img"], 0)],
+               "double_stream_modulation_txt.lin": [(HOST["mod_txt"], 0)]}
+    for i in range(L2):
+        a = f"transformer_blocks.{i}.attn"
+        s_o = _signs(seed, i, 3, D)  # the attention values: shared by both streams
+        for stream, (q, k, v, o), role, ff, orig in (
+                ("img", ("to_q", "to_k", "to_v", "to_out.0"), 1, "ff", "img"),
+                ("txt", ("add_q_proj", "add_k_proj", "add_v_proj", "to_add_out"), 2, "ff_context", "txt")):
+            name = f"double.{i}.{stream}"
+            s_in = _signs(seed, i, role, D)
+            s_m, s_f = _signs(seed, i, 4 + 2 * role, D), _signs(seed, i, 5 + 2 * role, F)
+            li, lo = f"transformer_blocks.{i}.{ff}.linear_in", f"transformer_blocks.{i}.{ff}.linear_out"
+            plans[f"{name}.qkv"] = LinearPlan("qkv", [Part(f"{a}.{q}", D, rows=perm), Part(f"{a}.{k}", D, rows=perm),
+                                                      Part(f"{a}.{v}", D, sign=s_o)], D, s_in)
+            plans[f"{name}.out"] = LinearPlan("out", [Part(f"{a}.{o}", D)], D, s_o)
+            # linear_in [2F][D]: the SiLU'd half first, then the multiplied half
+            plans[f"{name}.fc1"] = LinearPlan("fc1", [Part(li, F, rows=rng(F, 2 * F), sign=s_f),
+                                                      Part(li, F, rows=rng(F))], D, s_m)
+            plans[f"{name}.fc2"] = LinearPlan("fc2", [Part(lo, D)], F, s_f)
+            b = f"double_blocks.{i}.{orig}"
+            aliases[f"{b}_attn.qkv"] = [(f"{a}.{q}", 0), (f"{a}.{k}", D), (f"{a}.{v}", 2 * D)]
+            aliases[f"{b}_attn.proj"] = [(f"{a}.{o}", 0)]
+            aliases[f"{b}_mlp.0"] = [(li, 0)]
+            aliases[f"{b}_mlp.2"] = [(lo, 0)]
+    for j in range(L1):
+        layer = 1000 + j
+        a = f"single_transformer_blocks.{j}.attn"
+        s_in, s_o, s_f = _signs(seed, layer, 1, D), _signs(seed, layer, 3, D), _signs(seed, layer, 6, F)
+        fused = f"{a}.to_qkv_mlp_proj"  # [3D + 2F][D]: q, k, v, the SiLU'd half, the other half
+        plans[f"single.{j}.qkv_mlp"] = LinearPlan("qkv", [
+            Part(fused, D, rows=perm), Part(fused, D, rows=D + perm), Part(fused, D, rows=rng(2 * D, 3 * D), sign=s_o),
+            Part(fused, F, rows=rng(3 * D + F, 3 * D + 2 * F), sign=s_f), Part(fused, F, rows=rng(3 * D, 3 * D + F))],
+            D, s_in)
+        # to_out [D][D + F]: the attention's columns, then the MLP's, as two products
+        plans[f"single.{j}.out_attn"] = LinearPlan("out", [Part(f"{a}.to_out", D, cols=(0, D))], D, s_o)
+        plans[f"single.{j}.out_mlp"] = LinearPlan("fc2", [Part(f"{a}.to_out", D, cols=(D, D + F))], F, s_f)
+        aliases[f"single_blocks.{j}.linear1"] = [(fused, 0)]
+        aliases[f"single_blocks.{j}.linear2"] = [(f"{a}.to_out", 0)]
+    return plans, aliases
+
+
 def convert_transformer(src: str, out: str, *, fmts=None, seed: int = 1, log=print):
     """src: the FLUX.2 directory (transformer/ with config.json and safetensors)."""
     f = {"qkv": "q8", "out": "q8", "fc1": "q8", "fc2": "q8", **(fmts or {})}
@@ -105,74 +179,52 @@ def convert_transformer(src: str, out: str, *, fmts=None, seed: int = 1, log=pri
             "seed": seed, "fmts": f}
     w = Writer(out, meta)
     t0 = time.time()
+    plans, _ = model_plans(meta["config"], seed)
 
-    def host(name, key):
-        w.tensor(name, np.ascontiguousarray(st.get(key), np.float32), "f32", host_only=True)
+    def get(m):
+        return np.ascontiguousarray(st.get(f"{m}.weight"), np.float32)
 
     # Read on the CPU every step: the timestep MLP, the three modulation projections, the final modulation.
-    host("t_lin1", "time_guidance_embed.timestep_embedder.linear_1.weight")
-    host("t_lin2", "time_guidance_embed.timestep_embedder.linear_2.weight")
-    host("mod_img", "double_stream_modulation_img.linear.weight")
-    host("mod_txt", "double_stream_modulation_txt.linear.weight")
-    host("mod_single", "single_stream_modulation.linear.weight")
-    host("mod_final", "norm_out.linear.weight")
-    for name, key in (("x_embed", "x_embedder.weight"), ("ctx_embed", "context_embedder.weight"),
-                      ("proj_out", "proj_out.weight")):  # half-precision products on the matrix units
-        m = np.ascontiguousarray(st.get(key), np.float32)
+    for name in HOST:
+        w.tensor(name, plans[name].assemble(get), "f32", host_only=True)
+    for name in HALF:  # half-precision products on the matrix units
+        m = plans[name].assemble(get)
         codes, _ = quantize("f16", m)
         w.linear(name, "f16", m.shape[0], m.shape[1], codes, None)
 
     perm = _pair_perm(H, hd)
 
-    def put(name, kind, mat):
-        codes, scales = quantize(f[kind], mat)
-        w.linear(name, f[kind], mat.shape[0], mat.shape[1], codes, scales)
+    def put(name):
+        plan = plans[name]
+        mat = plan.assemble(get)
+        codes, scales = quantize(f[plan.kind], mat)
+        w.linear(name, f[plan.kind], mat.shape[0], mat.shape[1], codes, scales)
 
     def sign_vec(name, s):
         w.tensor(name, s.astype(np.float32), "f32", host_only=True)
 
-    def mlp(name, prefix, layer, role):
-        s_m, s_f = _signs(seed, layer, role, D), _signs(seed, layer, role + 1, F)
-        lin_in = st.get(f"{prefix}.linear_in.weight")  # [2F][D]: SiLU'd half first, then the multiplied half
-        gate, value = lin_in[:F], lin_in[F:]
-        put(f"{name}.fc1", "fc1", rotate_in(np.concatenate([value * s_f[:, None], gate]), s_m))
-        put(f"{name}.fc2", "fc2", rotate_in(st.get(f"{prefix}.linear_out.weight"), s_f))
-        sign_vec(f"{name}.s_mlp", s_m)
-
     for i in range(L2):
         a = f"transformer_blocks.{i}.attn"
-        s_o = _signs(seed, i, 3, D)  # the attention values: shared by both streams
-        for stream, (q, k, v, o, nq, nk), role in (
-                ("img", ("to_q", "to_k", "to_v", "to_out.0", "norm_q", "norm_k"), 1),
-                ("txt", ("add_q_proj", "add_k_proj", "add_v_proj", "to_add_out", "norm_added_q", "norm_added_k"),
-                 2)):
+        for stream, (nq, nk) in (("img", ("norm_q", "norm_k")), ("txt", ("norm_added_q", "norm_added_k"))):
             name = f"double.{i}.{stream}"
-            s_in = _signs(seed, i, role, D)
-            qkv = np.concatenate([st.get(f"{a}.{q}.weight")[perm], st.get(f"{a}.{k}.weight")[perm],
-                                  st.get(f"{a}.{v}.weight") * s_o[:, None]])
-            put(f"{name}.qkv", "qkv", rotate_in(qkv, s_in))
-            put(f"{name}.out", "out", rotate_in(st.get(f"{a}.{o}.weight"), s_o))
+            put(f"{name}.qkv")
+            put(f"{name}.out")
             w.tensor(f"{name}.q_norm", st.get(f"{a}.{nq}.weight")[perm[:hd]].astype(np.float32), "f32")
             w.tensor(f"{name}.k_norm", st.get(f"{a}.{nk}.weight")[perm[:hd]].astype(np.float32), "f32")
-            sign_vec(f"{name}.s_in", s_in)
-            mlp(name, f"transformer_blocks.{i}.{'ff' if stream == 'img' else 'ff_context'}", i, 4 + 2 * role)
+            sign_vec(f"{name}.s_in", plans[f"{name}.qkv"].s_in)
+            put(f"{name}.fc1")
+            put(f"{name}.fc2")
+            sign_vec(f"{name}.s_mlp", plans[f"{name}.fc1"].s_in)
         log(f"  double block {i + 1}/{L2} done ({time.time() - t0:.0f} s)")
     for j in range(L1):
-        layer = 1000 + j
         a = f"single_transformer_blocks.{j}.attn"
         name = f"single.{j}"
-        s_in, s_o, s_f = _signs(seed, layer, 1, D), _signs(seed, layer, 3, D), _signs(seed, layer, 6, F)
-        fused = st.get(f"{a}.to_qkv_mlp_proj.weight")  # [3D + 2F][D]: q, k, v, the SiLU'd half, the other half
-        q, k, v = fused[:D], fused[D:2 * D], fused[2 * D:3 * D]
-        gate, value = fused[3 * D:3 * D + F], fused[3 * D + F:]
-        put(f"{name}.qkv_mlp", "qkv", rotate_in(np.concatenate([q[perm], k[perm], v * s_o[:, None],
-                                                                value * s_f[:, None], gate]), s_in))
-        o = st.get(f"{a}.to_out.weight")  # [D][D + F]: the attention's columns, then the MLP's
-        put(f"{name}.out_attn", "out", rotate_in(o[:, :D], s_o))
-        put(f"{name}.out_mlp", "fc2", rotate_in(o[:, D:], s_f))
+        put(f"{name}.qkv_mlp")
+        put(f"{name}.out_attn")
+        put(f"{name}.out_mlp")
         w.tensor(f"{name}.q_norm", st.get(f"{a}.norm_q.weight")[perm[:hd]].astype(np.float32), "f32")
         w.tensor(f"{name}.k_norm", st.get(f"{a}.norm_k.weight")[perm[:hd]].astype(np.float32), "f32")
-        sign_vec(f"{name}.s_in", s_in)
+        sign_vec(f"{name}.s_in", plans[f"{name}.qkv_mlp"].s_in)
         if (j + 1) % 5 == 0:
             log(f"  single block {j + 1}/{L1} done ({time.time() - t0:.0f} s)")
     w.close()
@@ -227,6 +279,42 @@ class Flux2DiT:
         n += 2 * D
         self.tables = gpu.empty((n,), "f32")
         self._bufs = None
+        self.plans, self.aliases = model_plans(c, wf.meta.get("seed", 1))
+        self.linears = {"x_embed": self.x_embed, "ctx_embed": self.ctx_embed, "proj_out": self.proj_out}
+        for i, blk in enumerate(self.double):
+            for stream in ("img", "txt"):
+                for k in ("qkv", "out", "fc1", "fc2"):
+                    self.linears[f"double.{i}.{stream}.{k}"] = blk[stream][k]
+        for j, blk in enumerate(self.single):
+            for k in ("qkv_mlp", "out_attn", "out_mlp"):
+                self.linears[f"single.{j}.{k}"] = blk[k]
+        self.host_low = {}  # host matrix -> (A, B) of LoRA adapters
+
+    def set_loras(self, adapters):
+        """LoRA adapters [(layers from h3metal.lora.read, strength)] for the next requests ([] removes them):
+        low-rank terms on the products (h3metal/ops.py, low_rank) and on the CPU's modulation matrices. The
+        caption embedding runs in prepare(), so set them before it."""
+        for w in self.linears.values():
+            w.low = None
+        self.host_low = {}
+        if not adapters:
+            return
+        scratch = ops.Scratch(self.gpu)
+        for name, terms in lora.terms(adapters, self.plans, self.aliases, model="FLUX.2 [klein]").items():
+            A, B = lora.stack(terms)
+            if self.plans[name].kind == "host":
+                self.host_low[name] = (A.astype(np.float64), B.astype(np.float64))
+            else:
+                act = "f16" if self.plans[name].kind == "f16" else "q8"
+                self.linears[name].low = ops.low_rank(self.gpu, A, B, scratch, act=act)
+
+    def _host(self, name: str, w: np.ndarray, x: np.ndarray) -> np.ndarray:
+        """x W^T for a matrix the CPU applies, with its adapters' term."""
+        y = x @ w.T
+        if name in self.host_low:
+            A, B = self.host_low[name]
+            y = (y + (x.astype(np.float64) @ A.T) @ B.T).astype(np.float32)
+        return y
 
     def _tab(self, key, shape) -> Tensor:
         off, size = self.tab_layout[key]
@@ -235,10 +323,11 @@ class Flux2DiT:
     def modulation(self, sigma: float):
         """The step's modulation tables (CPU): FLUX.2's timestep embedding is that of sigma * 1000."""
         t = timestep_embedding(np.array([np.float32(sigma) * np.float32(1000)], np.float32), self.cfg["t_channels"])
-        temb = silu(t @ self.t_lin1.T) @ self.t_lin2.T  # [1][D]
+        h = self._host
+        temb = h("t_lin2", self.t_lin2, silu(h("t_lin1", self.t_lin1, t)))  # [1][D]
         st = silu(temb)
-        m_img, m_txt = (st @ self.w_mod_img.T)[0], (st @ self.w_mod_txt.T)[0]  # [6D]
-        m_single, m_final = (st @ self.w_mod_single.T)[0], (st @ self.w_mod_final.T)[0]
+        m_img, m_txt = h("mod_img", self.w_mod_img, st)[0], h("mod_txt", self.w_mod_txt, st)[0]  # [6D]
+        m_single, m_final = h("mod_single", self.w_mod_single, st)[0], h("mod_final", self.w_mod_final, st)[0]
         D = self.D
         tab = self.tables.numpy()
 
@@ -503,6 +592,7 @@ class Flux2Pipeline:
         self.tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
         self._te_cache: dict[str, np.ndarray] = {}
         self._dit = self._dit_wf = None
+        self.loras = lora.Loaded()
 
     def tokenize(self, prompt: str) -> tuple[np.ndarray, int]:
         """-> (ids padded to MAX_TOKENS, the number of prompt tokens)."""
@@ -552,12 +642,13 @@ class Flux2Pipeline:
             self._dit_wf = None
 
     def generate(self, prompt: str, width: int | None = None, height: int | None = None, seed: int = 0,
-                 progress=None, latents: np.ndarray | None = None, images=None, **_):
+                 progress=None, latents: np.ndarray | None = None, images=None, loras=(), **_):
         """-> (uint8 image [height][width][3], Timing). images: reference images (PIL) for an edit; without a size
         the image takes the first reference's (prepared) size, as in the official pipeline. latents: the starting
-        noise [C][height/16][width/16] instead of the seed's (tests)."""
+        noise [C][height/16][width/16] instead of the seed's (tests). loras: [(path to a LoRA file, strength)]."""
         from .flux_vae import FluxVAEDecoder, FluxVAEEncoder
         from .pipeline import Timing, noise
+        adapters = self.loras.read(loras)  # before the work: a file that cannot be applied stops here
         refs = [prepare_reference(im) for im in images or []]
         if refs and (width is None or height is None):
             height, width = refs[0].shape[:2]
@@ -583,8 +674,12 @@ class Flux2Pipeline:
         if self._dit is None:
             self._dit_wf = WeightFile(self.gpu, self.paths["dit"])
             self._dit = Flux2DiT(self.gpu, self._dit_wf)
+            self.loras.applied = None
             timing.add("load", time.time() - t)
         dit = self._dit
+        t = time.time()
+        if self.loras.apply(dit, adapters) and adapters:
+            timing.add("lora", time.time() - t)
         hp, wp = height // 16, width // 16
         C = dit.cfg["in_channels"]
         t = time.time()

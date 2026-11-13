@@ -37,10 +37,15 @@ ap = argparse.ArgumentParser()
 ap.add_argument("model")
 ap.add_argument("ref")
 ap.add_argument("--save")
+ap.add_argument("--ref-embeds", action="store_true", help="feed the reference's text embeddings (isolates the "
+                "transformer, its adapters and the decoder from the text encoder)")
 ap.add_argument("--image")
 a = ap.parse_args()
 r = np.load(a.ref)
 prompt, seed, size = str(r["prompt"]), int(r["seed"]), int(r["size"])
+loras = [(str(r["lora"]), float(r["lora_scale"]))] if "lora" in r else []
+if loras:
+    print(f"LoRA {os.path.basename(loras[0][0])} at {loras[0][1]} (the reference run's)")
 os.environ["H3METAL_CACHE"] = "off"
 pipe = Flux2Pipeline(a.model, log=lambda *x: None)
 
@@ -69,7 +74,9 @@ if a.image:
     enc = FluxVAEEncoder(pipe.gpu, WeightFile(pipe.gpu, pipe.paths["vae"])).encode_packed(px)
     rows = enc.reshape(enc.shape[0], -1).T
     print(f"reference image encoded: rel err {rel(rows, r['ref_rows']):.4f}")
-img, timing = pipe.generate(prompt, size, size, seed=seed, latents=r["noise"], images=images)
+if a.ref_embeds:
+    pipe.encode_prompt = lambda p, t: ref_emb
+img, timing = pipe.generate(prompt, size, size, seed=seed, latents=r["noise"], images=images, loras=loras)
 dit = pipe._dit
 if images is None:
     dit.prepare(ref_emb, image_positions(hp, wp))

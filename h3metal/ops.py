@@ -6,7 +6,9 @@ results are available after `gpu.wait()`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+
+import numpy as np
 
 from .gpu import Gpu, Tensor, pack
 
@@ -25,10 +27,89 @@ class QWeight:
     G: int = 128
     bias: Tensor | None = None
     ws: int | None = None  # row stride of the codes in elements, when it differs from K (a slice of K)
+    low: LowRank | None = None  # a low-rank term added to the product (LoRA adapters)
 
     @property
     def w_stride(self) -> int:
         return self.ws or self.K
+
+
+class Scratch:
+    """A growable half-precision buffer for the low-rank terms' T (one per model: dispatches run in order)."""
+
+    def __init__(self, gpu: Gpu):
+        self.gpu, self.t, self.n = gpu, None, 0
+
+    def get(self, rows: int, cols: int) -> Tensor:
+        if rows * cols > self.n:
+            self.n = max(rows * cols, 2 * self.n)
+            self.t = self.gpu.empty((self.n,), "f16")
+        return self.t.view((rows, cols))
+
+
+LOW_TILE = (64, 32, 2)  # the input-side product's tile: R is a multiple of 32
+RANK_STEP = 16          # rank ranges start and end on multiples of this (the matrix units' K granularity)
+
+
+@dataclass
+class LowRank:
+    """out += T B^T with T = A' x^T: the low-rank term of kernels/gemm.metal (LORA 1).
+
+    a: the input side, a product of R outputs on the same activations as the main product (int8 codes for int8
+    activations, half for half ones); b: [N][R] half; lo, hi: per output column, the rank range B touches."""
+    a: QWeight
+    b: Tensor
+    lo: np.ndarray
+    hi: np.ndarray
+    scratch: Scratch
+    tables: dict = field(default_factory=dict)
+
+    @property
+    def R(self) -> int:
+        return self.a.N
+
+    def table(self, gpu: Gpu, tn: int) -> Tensor:
+        """[T's row stride, B's row stride, then (k0, k1) per column tile of width tn]."""
+        t = self.tables.get(tn)
+        if t is None:
+            n_t = len(self.lo) // tn
+            lo = self.lo.reshape(n_t, tn).min(1)
+            hi = self.hi.reshape(n_t, tn).max(1)
+            lo = np.where(hi > lo, lo // RANK_STEP * RANK_STEP, 0)
+            hi = np.where(hi > lo, -(-hi // RANK_STEP) * RANK_STEP, 0)
+            t = gpu.upload(np.concatenate([[self.R, self.R], np.stack([lo, hi], 1).reshape(-1)]).astype(np.int32))
+            self.tables[tn] = t
+        return t
+
+
+def low_rank(gpu: Gpu, A: np.ndarray, B: np.ndarray, scratch: Scratch, act: str = "q8") -> LowRank:
+    """The low-rank term out += x A^T B^T for x the product's input (in the stored, rotated input space).
+
+    A [r][K] and B [N][r] in float; ranks whose B column is zero cost nothing in the column tiles they miss. Each
+    rank's scale moves to A (B's columns are normalized to a maximum of 1), so that T and B fit half precision.
+    act: "q8" for a product on int8 activations, "f16" for half ones."""
+    from .quant import quant_q8
+    r, K = A.shape
+    N = B.shape[0]
+    if B.shape[1] != r:
+        raise ValueError(f"low rank: A {A.shape} and B {B.shape} disagree")
+    R = -(-r // LOW_TILE[1]) * LOW_TILE[1]
+    c = np.abs(B).max(0)
+    c = np.where(c > 0, c, 1.0).astype(np.float64)
+    a = np.zeros((R, K), np.float32)
+    a[:r] = A.astype(np.float64) * c[:, None]
+    b = np.zeros((N, R), np.float16)
+    b[:, :r] = (B.astype(np.float64) / c[None, :]).astype(np.float16)
+    if act == "q8":
+        codes, sw = quant_q8(a)
+        aw = QWeight("q8", gpu.upload(codes), gpu.upload(sw), R, K)
+    else:
+        aw = QWeight("f16", gpu.upload(a.astype(np.float16)), None, R, K)
+    nz = b != 0
+    any_nz = nz.any(1)
+    lo = np.where(any_nz, nz.argmax(1), 0).astype(np.int64)
+    hi = np.where(any_nz, R - nz[:, ::-1].argmax(1), 0).astype(np.int64)
+    return LowRank(aw, gpu.upload(b), lo, hi, scratch)
 
 
 # Whether the accelerator's register layout is the one the fast group-scale
@@ -42,12 +123,23 @@ def pad_rows(m: int, tile: int = 128) -> int:
 
 def gemm(gpu: Gpu, a: Tensor, wt: QWeight, out: Tensor, M: int, *, sa: Tensor | None = None, epi: int = 0,
          rtype: Tensor | None = None, gate: Tensor | None = None, g_stride: int = 0, c_stride: int | None = None,
-         a_stride: int | None = None, tile=(64, 128, 4), swz: int = 1, ksplit: int = 1):
+         a_stride: int | None = None, tile=(64, 128, 4), swz: int = 1, ksplit: int = 1, _low=None):
     """out = A x W^T (epi 0), or out += gate[rtype] * (A x W^T) (epi 1, out float).
 
     ksplit: accumulate the product in that many dispatches over consecutive slices of K (epi 1 and per-row
     scales only). Long products run faster this way: each dispatch's working set fits the caches better.
+    A weight with a low-rank term (wt.low) first computes the term's input side T from the same activations,
+    then adds T B^T inside the main product's epilogue (in its first dispatch, when K is split).
     """
+    if wt.low is not None:
+        lo = wt.low
+        # T covers the rows of the whole 128-row tiles the activations are allocated in, so it holds every row any
+        # tile of the main product reads
+        m_rows = (M + 127) // 128 * 128
+        t = lo.scratch.get(m_rows, lo.R)
+        gemm(gpu, a, lo.a, t, m_rows, sa=sa if lo.a.fmt == "q8" else None, a_stride=a_stride, tile=LOW_TILE)
+        _low = (t, lo)
+        wt = replace(wt, low=None)
     if ksplit > 1:
         if epi != 1 or wt.fmt not in ("q8", "q4", "h8", "h4") or wt.K % (ksplit * 256):
             raise ValueError(f"cannot split K of a {wt.fmt} product (epi {epi}, K {wt.K}) {ksplit} ways")
@@ -57,7 +149,8 @@ def gemm(gpu: Gpu, a: Tensor, wt: QWeight, out: Tensor, M: int, *, sa: Tensor | 
             part = replace(wt, w=wt.w.view((wt.N, kp // per_byte), offset_elems=i * kp // per_byte), K=kp,
                            ws=wt.w_stride, bias=wt.bias if i == 0 else None)
             gemm(gpu, a.view((a.shape[0], kp), offset_elems=i * kp), part, out, M, sa=sa, epi=1, rtype=rtype,
-                 gate=gate, g_stride=g_stride, c_stride=c_stride, a_stride=a_stride or wt.K, tile=tile, swz=swz)
+                 gate=gate, g_stride=g_stride, c_stride=c_stride, a_stride=a_stride or wt.K, tile=tile, swz=swz,
+                 _low=_low if i == 0 else None)
         return
     tm, tn, nsg = tile
     # The grid covers whole tiles only: with a tile width that does not divide N, the last N % tn columns would
@@ -67,12 +160,18 @@ def gemm(gpu: Gpu, a: Tensor, wt: QWeight, out: Tensor, M: int, *, sa: Tensor | 
     out_t = OUT_DT[out.dtype] if epi == 0 else "float"
     k = gpu.kernel("gemm.metal", "gemm", WFMT=FMT_ID[wt.fmt], EPI=epi, OUT_T=out_t, TM=tm, TN=tn, NSG=nsg,
                    G=wt.G, HAS_BIAS=int(wt.bias is not None),
-                   FAST_LAYOUT=int(wt.fmt in ("q4g", "h4g") and tile == (64, 128, 4) and FAST_LAYOUT_OK), SWZ=swz)
+                   FAST_LAYOUT=int(wt.fmt in ("q4g", "h4g") and tile == (64, 128, 4) and FAST_LAYOUT_OK), SWZ=swz,
+                   LORA=int(_low is not None))
     m_pad = (M + tm - 1) // tm * tm
     params = pack("8i", m_pad, wt.N, wt.K, a_stride or wt.K, c_stride or wt.N, wt.w_stride, wt.K // wt.G,
                   g_stride or wt.N)
-    gpu.launch(k, (wt.N // tn, m_pad // tm, 1), (32 * nsg, 1, 1),
-               [a, wt.w, wt.sw, sa, out, wt.bias, rtype, gate], params)
+    args = [a, wt.w, wt.sw, sa, out, wt.bias, rtype, gate]
+    if _low is not None:
+        t, lo = _low
+        if lo.b.shape[0] != wt.N:
+            raise ValueError(f"low-rank term for {lo.b.shape[0]} outputs on a product of {wt.N}")
+        args += [None, t, lo.b, lo.table(gpu, tn)]
+    gpu.launch(k, (wt.N // tn, m_pad // tm, 1), (32 * nsg, 1, 1), args, params, params_index=8)
 
 
 def attention(gpu: Gpu, q: Tensor, k: Tensor, v: Tensor, out: Tensor, *, Lq: int, L: int, H: int, KVH: int,

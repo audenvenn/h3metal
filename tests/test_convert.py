@@ -177,16 +177,19 @@ def test_serve_page_and_checks():
     import urllib.request
     from http.server import ThreadingHTTPServer
     from h3metal import serve
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as ld:
         serve.OUT_DIR = d
-        studio = serve.Studio({"Z-Image-Turbo": "/nonexistent"}, None)
+        open(os.path.join(ld, "style.safetensors"), "wb").close()
+        open(os.path.join(ld, "notes.txt"), "wb").close()
+        studio = serve.Studio({"Z-Image-Turbo": "/nonexistent", "MiniMax-H3-Image": "/nonexistent"}, None, ld)
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(studio))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
             assert b"h3metal studio" in urllib.request.urlopen(url + "/").read()
             st = json.loads(urllib.request.urlopen(url + "/state").read())
-            assert st["models"] == ["Z-Image-Turbo"] and st["default"] == "Z-Image-Turbo"
+            assert st["models"] == ["Z-Image-Turbo", "MiniMax-H3-Image"] and st["default"] == "Z-Image-Turbo"
+            assert st["loras"] == ["style.safetensors"], st["loras"]
             assert json.loads(urllib.request.urlopen(url + "/history").read()) == []
             for path in ("/outputs/..%2Fsecret.png", "/outputs/missing.png", "/nothing"):
                 try:
@@ -194,8 +197,14 @@ def test_serve_page_and_checks():
                     raise AssertionError(path)
                 except urllib.error.HTTPError as e:
                     assert e.code == 404, (path, e.code)
+            lo = '"prompt": "x", "loras": '
             for body, msg in ((b'{"prompt": ""}', "empty"), (b'{"prompt": "x", "model": "nope"}', "unknown model"),
-                              (b"not json", "not JSON")):
+                              (b"not json", "not JSON"),
+                              (('{' + lo + '[{"name": "../style.safetensors"}]}').encode(), "no LoRA"),
+                              (('{' + lo + '[{"name": "notes.txt"}]}').encode(), "no LoRA"),
+                              (('{' + lo + '[{"name": "style.safetensors", "strength": 9}]}').encode(), "between"),
+                              (('{"model": "MiniMax-H3-Image", ' + lo + '[{"name": "style.safetensors"}]}').encode(),
+                               "work with")):
                 try:
                     urllib.request.urlopen(urllib.request.Request(url + "/generate", data=body))
                     raise AssertionError(body)
@@ -203,6 +212,87 @@ def test_serve_page_and_checks():
                     assert e.code == 400 and msg in json.loads(e.read())["error"], (body, e.code)
         finally:
             httpd.shutdown()
+
+
+def test_lora_terms_match_the_converter():
+    """A LoRA's terms on the converted layers equal the converter's own transform (h3metal/lora.py LinearPlan)
+    applied to the dense update scale * B A: for every layout (diffusers names, kohya's, the original fused
+    names) and both models, including rows that fused, permuted, sign-flipped or reordered layers move."""
+    import numpy as np
+    from h3metal import lora
+    from h3metal import flux2, zimage
+    from h3metal.st import save
+    rng = np.random.default_rng(0)
+    zc = {"dim": 512, "heads": 4, "head_dim": 128, "ffn": 1280, "layers": 1, "refiner_layers": 1}
+    fc = {"dim": 256, "heads": 2, "head_dim": 128, "ffn": 768, "double_layers": 1, "single_layers": 1,
+          "in_channels": 128, "joint_dim": 192, "t_channels": 256}
+    cases = (("zimage", zimage.model_plans(zc, 3), {
+        "layers.0.attention.to_q": None, "layers.0.attention.to_v": None, "layers.0.feed_forward.w3": None,
+        "noise_refiner.0.feed_forward.w2": None, "context_refiner.0.attention.to_out.0": None,
+        "layers.0.adaLN_modulation.0": None}, {"layers.0.attention.qkv": None}),
+             ("flux2", flux2.model_plans(fc, 5), {
+        "transformer_blocks.0.attn.add_k_proj": None, "transformer_blocks.0.ff.linear_in": None,
+        "single_transformer_blocks.0.attn.to_qkv_mlp_proj": None, "single_transformer_blocks.0.attn.to_out": None,
+        "x_embedder": None, "double_stream_modulation_img.linear": None},
+              {"double_blocks.0.txt_attn.qkv": None, "final_layer.adaLN_modulation.1": None}))
+    with tempfile.TemporaryDirectory() as d:
+        for model, (plans, aliases), direct, fused in cases:
+            index = lora._index(plans)
+            shapes = {m: lora._shape(index, plans, m) for m in index}
+            dense = {}  # module -> the update it gets, scale * B A
+            files = {"peft": {}, "kohya": {}}
+            for m in direct:
+                n_out, k = shapes[m]
+                A, B = rng.standard_normal((4, k)), rng.standard_normal((n_out, 4))
+                dense[m] = B @ A
+                files["peft"][f"diffusion_model.{m}.lora_A.weight"] = A.astype(np.float32)
+                files["peft"][f"diffusion_model.{m}.lora_B.weight"] = B.astype(np.float32)
+                kk = "lora_unet_" + m.replace(".", "_")
+                files["kohya"][f"{kk}.lora_down.weight"] = A.astype(np.float32)
+                files["kohya"][f"{kk}.lora_up.weight"] = (B * 4).astype(np.float32)
+                files["kohya"][f"{kk}.alpha"] = np.array(1.0, np.float32)  # alpha 1, rank 4: scale 1/4
+            files["fused"] = dict(files["peft"])
+            direct_only = dict(dense)
+            for a in fused:
+                parts = aliases[a]
+                k = shapes[parts[0][0]][1]
+                rows = []
+                for m, where in parts:
+                    n_out = shapes[m][0]
+                    rows.append(np.arange(where, where + n_out) if np.ndim(where) == 0 else np.asarray(where))
+                n_b = max(int(r.max()) + 1 for r in rows)
+                A, B = rng.standard_normal((4, k)), rng.standard_normal((n_b, 4))
+                for (m, _), r in zip(parts, rows):
+                    dense[m] = dense.get(m, 0) + B[r] @ A
+                files["fused"][f"base_model.model.{a}.lora_A.weight"] = A.astype(np.float32)
+                files["fused"][f"base_model.model.{a}.lora_B.weight"] = B.astype(np.float32)
+            for layout in ("peft", "kohya", "fused"):
+                path = os.path.join(d, f"{model}_{layout}.safetensors")
+                save(path, files[layout])
+                layers = lora.read(path)
+                ts = lora.terms([(layers, 0.75)], plans, aliases, model=model)
+                want = dense if layout == "fused" else direct_only
+                for name, plan in plans.items():
+                    if not any(p.module in want for p in plan.parts):
+                        assert name not in ts, (layout, name)
+                        continue
+                    expect = 0.75 * plan.assemble(lambda m: np.asarray(
+                        want.get(m, np.zeros(shapes[m])), np.float32))
+                    A, B = lora.stack(ts[name])
+                    got = B.astype(np.float64) @ A.astype(np.float64)
+                    err = np.abs(got - expect).max() / np.abs(expect).max()
+                    assert err < 1e-5, (model, layout, name, err)
+    for bad in ({"diffusion_model.layers.0.attention.to_q.lora_A.weight": np.ones((4, 100), np.float32),
+                 "diffusion_model.layers.0.attention.to_q.lora_B.weight": np.ones((512, 4), np.float32)},
+                {"diffusion_model.layers.9.attention.to_q.lora_A.weight": np.ones((4, 512), np.float32),
+                 "diffusion_model.layers.9.attention.to_q.lora_B.weight": np.ones((512, 4), np.float32)}):
+        with tempfile.TemporaryDirectory() as d:
+            save(os.path.join(d, "bad.safetensors"), bad)
+            try:
+                lora.terms([(lora.read(os.path.join(d, "bad.safetensors")), 1.0)], *cases[0][1], model="Z-Image")
+            except lora.LoraError:
+                continue
+            raise AssertionError("a LoRA for another model was not refused")
 
 
 if __name__ == "__main__":

@@ -151,7 +151,108 @@ def check_dit_tiles(model: str = "minimax-h3"):
                 assert err < 2e-3, (fmt, name, M, cfg, err)
 
 
+def check_low_rank(fmt="q8", M=200, N=768, K=512, epi=0, out_dtype="f16", tile=(64, 128, 4), swz=1, ksplit=1,
+                   seed=3):
+    """A product with a low-rank term (LoRA): out = A x W^T + (A x A_l^T) B_l^T, against float64 with the term's
+    stored codes (tight), and against the exact term (loose: the term's input side is stored in int8).
+
+    The term has a rank-16 block per third of the columns (like separate q, k and v adapters on a fused
+    product), a rank-8 block over all of them, and nothing on the last 128 columns."""
+    from h3metal.ops import Scratch, low_rank
+    rng = np.random.default_rng(seed)
+    gpu = Gpu()
+    m_pad = (M + 127) // 128 * 128
+    third = (N - 128) // 3
+    r_parts = [16, 16, 16, 8]
+    A_l = rng.standard_normal((sum(r_parts), K)).astype(np.float32) / np.sqrt(K)
+    B_l = np.zeros((N, sum(r_parts)), np.float32)
+    for i in range(3):
+        B_l[i * third:(i + 1) * third, 16 * i:16 * (i + 1)] = rng.standard_normal((third, 16)) * 0.5
+    B_l[:N - 128, 48:56] = rng.standard_normal((N - 128, 8)) * 0.5
+    if fmt in ("q8", "q4", "q4g"):
+        a = rng.integers(-127, 128, size=(m_pad, K), dtype=np.int8)
+        sa = rng.uniform(0.001, 0.01, size=m_pad).astype(np.float32)
+        x = a.astype(np.float64) * sa[:, None].astype(np.float64)
+        act = "q8"
+    else:
+        a = rng.standard_normal((m_pad, K)).astype(np.float16)
+        sa = None
+        x = a.astype(np.float64)
+        act = "f16"
+    if fmt == "q8":
+        q = rng.integers(-127, 128, size=(N, K), dtype=np.int8)
+        sw = rng.uniform(0.001, 0.01, size=N).astype(np.float32) / 10
+        wt = QWeight("q8", gpu.upload(q), gpu.upload(sw), N, K)
+        wf = q.astype(np.float64) * sw[:, None]
+    elif fmt == "q4":
+        q = rng.integers(-8, 8, size=(N, K))
+        sw = rng.uniform(0.001, 0.01, size=N).astype(np.float32)
+        wt = QWeight("q4", gpu.upload(pack_int4(q)), gpu.upload(sw), N, K)
+        wf = q.astype(np.float64) * sw[:, None]
+    elif fmt == "q4g":
+        G = 128
+        q = rng.integers(-8, 8, size=(N, K))
+        sw = rng.uniform(0.001, 0.01, size=(N, K // G)).astype(np.float32)
+        wt = QWeight("q4g", gpu.upload(pack_int4(q)), gpu.upload(np.ascontiguousarray(sw.T)), N, K, G)
+        wf = q.astype(np.float64) * np.repeat(sw, G, axis=1)
+    else:
+        wf16 = (rng.standard_normal((N, K)) * 0.05).astype(np.float16)
+        wt = QWeight("f16", gpu.upload(wf16), None, N, K)
+        wf = wf16.astype(np.float64)
+    lo = low_rank(gpu, A_l, B_l, Scratch(gpu), act=act)
+    wt.low = lo
+    main = x @ wf.T
+    exact = x @ A_l.T.astype(np.float64) @ B_l.T.astype(np.float64)
+    # what the kernel computes: T from the term's stored input side, rounded to half; B in half
+    R = lo.R
+    if act == "q8":
+        a_codes = lo.a.w.numpy().astype(np.float64)
+        T = (a.astype(np.float64) @ a_codes.T) * sa[:, None] * lo.a.sw.numpy()[None, :]
+    else:
+        T = a.astype(np.float64) @ lo.a.w.numpy().astype(np.float64).T
+    stored = T.astype(np.float16).astype(np.float64) @ lo.b.numpy().astype(np.float64).T
+    assert lo.b.shape == (N, R)
+    A = gpu.upload(a)
+    SA = gpu.upload(sa) if sa is not None else None
+    if epi == 0:
+        out = gpu.empty((m_pad, N), out_dtype)
+        gemm(gpu, A, wt, out, M, sa=SA, tile=tile, swz=swz)
+        gpu.wait()
+        got = out.numpy()[:M].astype(np.float64) if out_dtype != "bf16" else \
+            (out.numpy()[:M].astype(np.uint32) << 16).view(np.float32).astype(np.float64)
+        ref_t, ref_e = main + stored, main + exact
+    else:
+        x0 = rng.standard_normal((m_pad, N)).astype(np.float32)
+        X = gpu.upload(x0)
+        types = rng.integers(0, 3, size=m_pad).astype(np.uint8)
+        gates = rng.standard_normal((3, N)).astype(np.float32)
+        gemm(gpu, A, wt, X, M, sa=SA, epi=1, rtype=gpu.upload(types), gate=gpu.upload(gates), tile=tile,
+             swz=swz, ksplit=ksplit)
+        gpu.wait()
+        got = X.numpy()[:M].astype(np.float64)
+        ref_t = x0.astype(np.float64) + gates[types] * (main + stored)
+        ref_e = x0.astype(np.float64) + gates[types] * (main + exact)
+        ref_t, ref_e = ref_t, ref_e
+    ref_t, ref_e = ref_t[:M], ref_e[:M]
+    term = np.abs(exact[:M]).max() / np.abs(main[:M]).max()
+    err_t = np.abs(got - ref_t).max() / np.abs(ref_t).max()
+    err_e = np.abs(got - ref_e).max() / np.abs(ref_e).max()
+    print(f"low rank {fmt:4s} epi={epi} out={out_dtype} tile={tile}{f' ksplit={ksplit}' if ksplit > 1 else ''}: "
+          f"term/main {term:.2f}, max rel err {err_t:.2e} (stored term), {err_e:.2e} (exact term)")
+    assert term > 0.3, term  # the term is large enough for the check to see it
+    assert err_t < (2e-3 if out_dtype != "bf16" else 1e-2), err_t
+    assert err_e < 1e-2, err_e
+
+
 if __name__ == "__main__":
+    check_low_rank("q8")
+    check_low_rank("q8", out_dtype="bf16", tile=(64, 256, 8))
+    check_low_rank("q8", out_dtype="f32", tile=(32, 256, 4), swz=4)
+    check_low_rank("q8", epi=1, K=1024, ksplit=2)
+    check_low_rank("q8", epi=1, K=1024, tile=(32, 256, 4), ksplit=2)
+    check_low_rank("q4", epi=1)
+    check_low_rank("q4g", K=1024, out_dtype="f32")
+    check_low_rank("f16", M=130, N=384 + 128, K=256)
     for fmt in ("q8", "q4", "q4g", "f16", "h8", "h4", "h4g"):
         check(fmt)
     check("q4g", epi=1)
