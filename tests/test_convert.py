@@ -232,7 +232,7 @@ def test_serve_page_and_checks():
             assert b"h3metal studio" in urllib.request.urlopen(url + "/").read()
             st = json.loads(urllib.request.urlopen(url + "/state").read())
             assert st["models"] == ["Z-Image-Turbo", "MiniMax-H3-Image"] and st["default"] == "Z-Image-Turbo"
-            assert st["loras"] == ["style.safetensors"], st["loras"]
+            assert st["loras"] == [{"name": "style.safetensors", "models": []}], st["loras"]  # fits no model
             assert json.loads(urllib.request.urlopen(url + "/history").read()) == []
             for path in ("/outputs/..%2Fsecret.png", "/outputs/missing.png", "/nothing"):
                 try:
@@ -309,9 +309,12 @@ def test_lora_terms_match_the_converter():
                     dense[m] = dense.get(m, 0) + B[r] @ A
                 files["fused"][f"base_model.model.{a}.lora_A.weight"] = A.astype(np.float32)
                 files["fused"][f"base_model.model.{a}.lora_B.weight"] = B.astype(np.float32)
+            other = cases[1][1] if model == "zimage" else cases[0][1]
             for layout in ("peft", "kohya", "fused"):
                 path = os.path.join(d, f"{model}_{layout}.safetensors")
                 save(path, files[layout])
+                # the web page's check from the header alone: fits this model, not the other
+                assert lora.fits(lora.shapes(path), plans, aliases) and not lora.fits(lora.shapes(path), *other)
                 layers = lora.read(path)
                 ts = lora.terms([(layers, 0.75)], plans, aliases, model=model)
                 want = dense if layout == "fused" else direct_only

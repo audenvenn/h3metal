@@ -168,6 +168,52 @@ def read(path: str) -> dict:
     return out
 
 
+def shapes(path: str) -> dict | None:
+    """The adapter's layers from the file's header alone: {module: (A's shape, B's shape)}, or None for a file
+    read() would refuse. Cheap: no tensor is read."""
+    try:
+        st = SafeTensors(path)
+    except Exception:
+        return None
+    parts = {}
+    for key in st.keys():
+        if any(t in key.lower() for t in TEXT_ENCODER):
+            return None
+        sp = _split(key)
+        if sp is None:
+            return None
+        module, which = sp
+        parts.setdefault(_strip(module), {})[which] = st.shape(key)
+    out = {}
+    for module, d in parts.items():
+        if "A" not in d or "B" not in d:
+            return None
+        a, b = d["A"], d["B"]
+        out[module] = ((a[0], int(np.prod(a[1:]))), (b[0], int(np.prod(b[1:]))))
+    return out or None
+
+
+def fits(layer_shapes: dict | None, plans: dict, aliases: dict) -> bool:
+    """Whether terms() would take an adapter with these layer shapes (from shapes())."""
+    if not layer_shapes:
+        return False
+    index = _index(plans)
+    for module, (a, b) in layer_shapes.items():
+        targets = resolve(module, index, aliases)
+        if not targets:
+            return False
+        rows = 0
+        for real, where in targets:
+            n, k = _shape(index, plans, real)
+            last = where + n if np.ndim(where) == 0 else int(np.max(where)) + 1
+            rows = max(rows, last)
+            if k != a[1]:
+                return False
+        if b[0] != rows or b[1] != a[0]:
+            return False
+    return True
+
+
 # -- applying -----------------------------------------------------------------------------------------------------
 
 @dataclass
