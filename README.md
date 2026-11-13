@@ -51,7 +51,7 @@ The release's wheel holds the compiled GPU runtime, so nothing needs
 building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.6.0/h3metal-0.6.0-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.6.1/h3metal-0.6.1-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, ready to run: 8.3 GB
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
@@ -192,9 +192,9 @@ Images come out as `uint8` arrays; `timing` says where the time went.
   five lane shuffles per 256 values.
 - **Flash attention** with the operands in registers, the score product in
   int8, and the output's rescale skipped whenever no row's maximum moved.
-  MiniMax-H3-Image's queries and keys get the same Hadamard rotation before
-  their int8 rounding, which leaves every score unchanged and the rounding
-  smaller.
+  MiniMax-H3-Image's and FLUX.2's queries and keys get the same Hadamard
+  rotation before their int8 rounding, which leaves every score unchanged
+  and the rounding smaller.
 - **One command buffer per block** over memory-mapped weights: only the block
   that runs is pinned. The 26 GB text encoder streams from the SSD with a
   footprint of half a gigabyte, and a transformer larger than the Mac's
@@ -382,7 +382,7 @@ h3metal is 2.3 times faster; with the prompt seen before it is 12.4 s against
 
 With the same prompt, noise and text embeddings as diffusers'
 `Flux2KleinPipeline` in bfloat16, h3metal's transformer and decoder
-reproduce its image to 38.5 dB PSNR (SSIM 0.995). The whole pipeline lands
+reproduce its image to 39.0 dB PSNR (SSIM 0.994). The whole pipeline lands
 at 24 dB: klein pads every prompt to 512 tokens, the padding tokens' hidden
 states are fragile in any rounding (the official pipeline in bfloat16 moves
 them 12-13% from float32), and they steer the image. Against a float32 text

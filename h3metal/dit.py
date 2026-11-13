@@ -130,7 +130,7 @@ class DiT:
         self.qk8 = os.environ.get("H3METAL_QK8", "1") == "1"
         # Queries and keys rotated before that rounding (exact; ops.qk_norm_rope): on the real weights it halves the
         # scores' share of the transformer's error (docs/design.md).
-        self.qk_rot = os.environ.get("H3METAL_QKROT", "1") == "1"
+        self.qk_rot = os.environ.get("H3METAL_QKROT", "1") != "0"
         self.resident = self._resident_blocks()
 
     def _resident_blocks(self) -> int:
