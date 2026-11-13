@@ -50,7 +50,7 @@ The release's wheel holds the compiled GPU runtime, so nothing needs
 building:
 
 ```sh
-pip install https://github.com/audenvenn/h3metal/releases/download/v0.5.1/h3metal-0.5.1-py3-none-macosx_26_0_arm64.whl
+pip install https://github.com/audenvenn/h3metal/releases/download/v0.6.0/h3metal-0.6.0-py3-none-macosx_26_0_arm64.whl
 
 h3metal download --model flux2-klein-4b   # FLUX.2 [klein] 4B, ready to run: 8.3 GB
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
@@ -76,6 +76,9 @@ h3metal download                       # the official checkpoint, ~125 GB
 h3metal convert ~/.h3metal/checkpoint  # writes ~/.h3metal/model
 h3metal generate -p "A red fox in fresh snow at sunrise" -o fox.png
 h3metal generate -p "Put <Picture 1> on a beach at dusk" -i photo.jpg -o edit.png
+
+h3metal convert ~/.h3metal/checkpoint --pdmd   # optional: 2, 3 or 4 steps with pDMD's 2-step LoRA
+h3metal generate --steps 2 -p "A red fox in fresh snow at sunrise" -o fox.png
 ```
 
 Without `--model`, `generate` uses the first of MiniMax-H3-Image,
@@ -438,6 +441,11 @@ another model to the engine, [docs/engine.md](docs/engine.md) lists its
 parts and the steps Z-Image took.
 
 ## Acknowledgements
+
+The 2-step mode of MiniMax-H3-Image uses the LoRA of
+[pDMD](https://arxiv.org/abs/2609.35768) (Apache-2.0, by its authors), and
+[akhaliq](https://huggingface.co/akhaliq/minimax-h3-image-pdmd-2step) first
+showed it working with MiniMax-H3-Image.
 
 The reference implementations in
 [diffusers](https://github.com/huggingface/diffusers) and

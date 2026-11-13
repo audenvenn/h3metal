@@ -1,5 +1,22 @@
 # Images
 
+`pdmd_steps.jpg`: AI-generated with h3metal on a Mac mini (M6, 24 GB), int8 attention and int4 MLP weights,
+2048 x 2048, seed 42; each picture resized to 554 x 554. Columns: the six-step model (`dit.h3m`), then the
+few-step transformer (`dit-pdmd.h3m`, docs/few-step.md) at 4 and at 2 steps. Prompts, by row:
+
+> A red fox sitting in fresh snow at sunrise, photorealistic, soft golden light.
+
+> A cozy corner bookshop on a rainy evening, warm light spilling from the windows onto the wet cobblestones, a
+> hand-painted wooden sign above the door reading "THE QUIET PAGE", a bicycle leaning against the lamppost,
+> photorealistic.
+
+> A flat vector travel poster of a lighthouse on a cliff above a turquoise sea, seagulls, bold geometric shapes,
+> the words "VISIT CAPE ARIA" in large white letters at the top.
+
+```sh
+h3metal generate -p "<the prompt>" --seed 42 [--steps 4 | --steps 2] -o out.png
+```
+
 `hero.jpg`: AI-generated with h3metal on a Mac mini (M6, 24 GB), int8
 attention and int4 MLP weights, 3136 x 1344, seed 2, 48 s from a new
 prompt; resized to 2000 pixels wide for the README. Prompt:
