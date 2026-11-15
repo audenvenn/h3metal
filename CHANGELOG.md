@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `bench/drawthings.py` and a comparison with Draw Things' command-line tool in
+  [docs/benchmarks.md](docs/benchmarks.md#flux2-klein-4b-and-z-image-turbo-against-draw-things): at 1024 x 1024
+  h3metal is 2.4 times faster on FLUX.2 [klein] 4B and 2.3 times on Z-Image-Turbo, per step as well as end to
+  end.
+
 ## [0.6.4] - 2026-11-13
 
 ### Fixed

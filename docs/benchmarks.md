@@ -146,6 +146,40 @@ The same method and prompt as for 4B, with mflux's own 8-bit copy of 9B (`mflux-
 The process footprints are 2.3 GB for h3metal, which maps its 17 GB of weight files, and 13.9 GB for mflux.
 One transformer step at 1024 x 1024 takes 2.71 s, 71% of what the matrix units need at their measured peaks.
 
+## FLUX.2 [klein] 4B and Z-Image-Turbo, against Draw Things
+
+[Draw Things](https://drawthings.ai)' command-line tool, `draw-things-cli` v26.1023.0 (the macOS build released
+with [draw-things-community](https://github.com/drawthingsai/draw-things-community)), generating locally with its
+own 8-bit models: "8-bit S" (`_i8x`) and 8-bit (`_q8p`). It runs each model with its recommended settings, DDIM
+Trailing for FLUX.2 [klein] 4B and UniPC Trailing for Z-Image-Turbo
+([configs.json](https://models.drawthings.ai/configs.json)). Both samplers evaluate the transformer once per
+step, and at CFG 1 Draw Things skips the unconditional pass (`isCfgEnabled` in its `Sampler.swift`), so both
+implementations run the same transformer passes. Every run is a fresh process timed as above (`bench/speed.py`),
+the three alternate with a 45 s pause before every run, one warm-up of each is not recorded, and h3metal's prompt
+cache is off (`H3METAL_CACHE=off`), so both encode the prompt every run. 1024 x 1024, the same prompt, seed 42:
+
+| Model | h3metal | Draw Things 8-bit S | Draw Things 8-bit | Speed-up |
+|---|---:|---:|---:|---:|
+| FLUX.2 [klein] 4B, 4 steps (2 runs) | 7.0 s (7.0, 6.9) | 17.0 s (16.1, 17.9) | 18.3 s (19.0, 17.5) | 2.4x |
+| Z-Image-Turbo, 8 steps (2 runs) | 17.1 s (17.1, 17.1) | 40.0 s (39.2, 40.8) | 53.1 s (50.7, 55.5) | 2.3x |
+
+The speed-up is against the faster of the two. The gap is in the denoising, not in loading. From the times at
+which Draw Things prints its progress lines (`Sampling... 1 / N` to `N / N`, run under a pseudo-terminal), one
+transformer step takes it 2.70 s for FLUX.2 [klein] 4B and 4.30 s for Z-Image-Turbo (two runs each, within
+0.03 s), against 1.16 s and 1.84 s for h3metal (its own phase timing in the runs above: 4.6-4.7 s and 14.7 s of
+denoising). Before its first step Draw Things spends 3.8-8.6 s starting, loading and encoding the prompt (h3metal
+1.2-1.4 s), and after its last 1.2 s decoding (h3metal 1.0-1.1 s). Denoising and decoding alone, the work left
+when the models are loaded and the prompt encoded, still take Draw Things 2.1 times as long for FLUX.2 [klein] 4B
+and 2.3 times for Z-Image-Turbo.
+
+The two draw different pictures for the same seed, as each draws its own noise. The process footprints (h3metal
+2.2-2.3 GB; Draw Things 5.0 and 6.8 GB with the 8-bit S models) do not compare memory like for like (see
+[Z-Image-Turbo, against mflux](#z-image-turbo-against-mflux)).
+
+Command: `bench/drawthings.py --cli <draw-things-cli> --models-dir <dir> --out drawthings.json`, after
+`draw-things-cli models ensure --models-dir <dir> --model <file> --include-dependencies` for each of the four files
+it names.
+
 ## MiniMax-H3-Image in fewer steps
 
 The six-step model (`dit.h3m`) against the few-step transformer with pDMD's 2-step LoRA merged
