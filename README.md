@@ -17,17 +17,22 @@ measured peak.
 
 On a Mac mini with an M6 (12-core GPU, 24 GB):
 
-- **Z-Image-Turbo:** a 1024 x 1024 image takes 17 s from a new prompt, 2.1
-  times faster than [mflux](https://github.com/filipstrand/mflux), and comes
-  out nearly the same picture as the official pipeline.
-- **FLUX.2 [klein] 4B:** a 1024 x 1024 image takes 7.4 s from a new prompt,
-  2.3 times faster than mflux.
+- **Z-Image-Turbo:** a 1024 x 1024 image takes 17 s from a new prompt, 2.3
+  times faster than [Draw Things](https://drawthings.ai)' command-line tool
+  and 2.1 times faster than [mflux](https://github.com/filipstrand/mflux),
+  and comes out nearly the same picture as the official pipeline.
+- **FLUX.2 [klein] 4B:** a 1024 x 1024 image takes 7 s from a new prompt,
+  2.4 times faster than Draw Things and 2.3 times faster than mflux.
 - **FLUX.2 [klein] 9B:** 14.1 s, also 2.3 times faster than mflux.
 - **MiniMax-H3-Image:** a 2048 x 2048 image takes 41 s (46 s with a new
   prompt) and a 4096 x 4096 image 236 s, 2.8 and 1.9 times faster than
   [h3-image-mlx](https://github.com/Anionex/h3-image-mlx) on the same
   machine (4.5 times at 1024 x 1024). In two steps with pDMD's distilled
   LoRA it takes 16 s and 85 s ([docs/few-step.md](docs/few-step.md)).
+
+All these numbers come from this one Mac; each comparison ran back to back
+on it ([method](docs/benchmarks.md)). h3metal is built for M5- and M6-class
+GPUs only: M1-M4 have no matrix units, and it is not tested on them.
 
 Z-Image-Turbo and FLUX.2 [klein] take LoRA adapters: style adapters and
 FLUX.2's edit adapters (outpainting, object removal, ...). They are applied
@@ -306,6 +311,23 @@ MLP). With int8 weights throughout, like h3-image-mlx's, it takes 45.0 s at
 2048 x 2048 (2.6x). The gap narrows with size because attention, which
 grows with the square of the number of rows, takes half of the time at
 4096 x 4096.
+
+### Against Draw Things
+
+[Draw Things](https://drawthings.ai)' command-line tool, `draw-things-cli`
+v26.1023.0, with its own 8-bit models ("8-bit S") and its recommended
+settings, on the same machine. Both run one transformer pass per step (its
+samplers for these models take one, and at CFG 1 it skips the unconditional
+pass), both encode the prompt every run, and every run is a fresh process
+([method](docs/benchmarks.md#flux2-klein-4b-and-z-image-turbo-against-draw-things)):
+
+| 1024 x 1024 | h3metal | Draw Things | Speed-up | A transformer step |
+|---|---:|---:|---:|---:|
+| FLUX.2 [klein] 4B, 4 steps | 7.0 s | 17.0 s | 2.4x | 1.16 s against 2.70 s |
+| Z-Image-Turbo, 8 steps | 17.1 s | 40.0 s | 2.3x | 1.84 s against 4.30 s |
+
+The gap is in the denoising, not in loading, so it holds with the models
+already loaded, as in the Draw Things app (2.1-2.3x).
 
 ## Z-Image-Turbo
 
