@@ -26,8 +26,8 @@ On a Mac mini with an M6 (12-core GPU, 24 GB):
 - **FLUX.2 [klein] 9B:** 14.1 s, also 2.3 times faster than mflux.
 - **MiniMax-H3-Image:** a 2048 x 2048 image takes 41 s (46 s with a new
   prompt) and a 4096 x 4096 image 236 s, 2.8 and 1.9 times faster than
-  [h3-image-mlx](https://github.com/Anionex/h3-image-mlx) on the same
-  machine (4.5 times at 1024 x 1024). In two steps with pDMD's distilled
+  [h3-image-mlx](https://github.com/Anionex/h3-image-mlx) 0.1.0a3 on the
+  same machine (4.5 times at 1024 x 1024). In two steps with pDMD's distilled
   LoRA it takes 16 s and 85 s ([docs/few-step.md](docs/few-step.md)).
 
 All these numbers come from this one Mac; each comparison ran back to back
